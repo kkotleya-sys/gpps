@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { MapPin, Settings as SettingsIcon, LogIn, Menu } from 'lucide-react';
+import { MapPin, LogIn, Map, Clock4, Settings as SettingsIcon } from 'lucide-react';
 import { useAuth } from './contexts/AuthContext';
 import { useGeolocation } from './hooks/useGeolocation';
 import { supabase } from './lib/supabase';
@@ -9,16 +9,18 @@ import { Settings } from './components/Settings';
 import { AdminPanel } from './components/AdminPanel';
 import { BusInfo } from './components/BusInfo';
 import { BusWithDriver, UserRole } from './types';
+import { ScheduleView } from './components/ScheduleView';
+
+type MainTab = 'map' | 'schedule' | 'settings';
 
 function App() {
   const { user, profile, loading: authLoading } = useAuth();
   const [showAuth, setShowAuth] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
   const [showAdmin, setShowAdmin] = useState(false);
   const [buses, setBuses] = useState<BusWithDriver[]>([]);
   const [selectedBus, setSelectedBus] = useState<BusWithDriver | null>(null);
   const [guestMode, setGuestMode] = useState(false);
-  const [showMenu, setShowMenu] = useState(false);
+  const [activeTab, setActiveTab] = useState<MainTab>('map');
 
   const isDriver = profile?.role === UserRole.DRIVER;
   const location = useGeolocation(!!user || guestMode);
@@ -115,106 +117,157 @@ function App() {
   }
 
   return (
-    <div className="h-screen flex flex-col">
-      <header className="bg-white shadow-md z-20 relative">
+    <div className="h-screen flex flex-col bg-gray-50 dark:bg-gray-900 transition-colors duration-300">
+      <header className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 shadow-sm z-20 transition-colors duration-300">
         <div className="px-4 py-3 flex items-center justify-between">
           <div className="flex items-center space-x-3">
-            <div className="w-10 h-10 bg-blue-500 rounded-xl flex items-center justify-center">
+            <div className="w-10 h-10 bg-gray-900 dark:bg-gray-700 rounded-2xl flex items-center justify-center shadow-lg">
               <MapPin className="w-6 h-6 text-white" />
             </div>
             <div>
-              <h1 className="text-xl font-bold text-gray-800">Душанбе Транспорт</h1>
-              <p className="text-xs text-gray-600">
+              <h1 className="text-lg font-bold text-gray-900 dark:text-gray-50">Душанбе Транспорт</h1>
+              <p className="text-xs text-gray-600 dark:text-gray-400">
                 {profile ? `${profile.first_name} ${profile.last_name}` : 'Гость'}
               </p>
             </div>
           </div>
 
-          <div className="flex items-center space-x-2">
-            {!user && !guestMode && (
-              <button
-                onClick={() => setShowAuth(true)}
-                className="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
-              >
-                <LogIn className="w-6 h-6" />
-              </button>
-            )}
-
-            {(user || guestMode) && (
-              <>
-                <button
-                  onClick={() => setShowMenu(!showMenu)}
-                  className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors md:hidden"
-                >
-                  <Menu className="w-6 h-6" />
-                </button>
-
-                <button
-                  onClick={() => setShowSettings(true)}
-                  className="hidden md:block p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
-                >
-                  <SettingsIcon className="w-6 h-6" />
-                </button>
-              </>
-            )}
-          </div>
-
-          {showMenu && (
-            <div className="absolute top-full right-4 mt-2 bg-white rounded-lg shadow-xl border border-gray-200 py-2 min-w-[200px] md:hidden">
-              <button
-                onClick={() => {
-                  setShowSettings(true);
-                  setShowMenu(false);
-                }}
-                className="w-full px-4 py-2 text-left hover:bg-gray-50 transition-colors flex items-center space-x-2"
-              >
-                <SettingsIcon className="w-5 h-5" />
-                <span>Настройки</span>
-              </button>
-            </div>
+          {!user && !guestMode && (
+            <button
+              onClick={() => setShowAuth(true)}
+              className="px-3 py-1.5 rounded-full text-xs font-semibold bg-gray-900 dark:bg-gray-700 text-white shadow-sm active:scale-95 transition-all hover:bg-gray-800 dark:hover:bg-gray-600"
+            >
+              <span className="inline-flex items-center space-x-1">
+                <LogIn className="w-4 h-4" />
+                <span>Войти</span>
+              </span>
+            </button>
           )}
         </div>
       </header>
 
-      <main className="flex-1 relative">
-        <MapView
-          buses={buses}
-          userLocation={
-            location.latitude && location.longitude && !location.loading
-              ? { lat: location.latitude, lng: location.longitude }
-              : null
-          }
-          onBusClick={setSelectedBus}
-        />
+      <main className="flex-1 relative overflow-hidden">
+        <div className="h-full relative">
+          {activeTab === 'map' && (
+            <div className="h-full animate-fade-in">
+              <MapView
+                buses={buses}
+                userLocation={
+                  location.latitude && location.longitude && !location.loading
+                    ? { lat: location.latitude, lng: location.longitude }
+                    : null
+                }
+                onBusClick={setSelectedBus}
+                isDriver={isDriver}
+                driverBusNumber={profile?.bus_number || null}
+                driverId={user?.id || null}
+              />
+            </div>
+          )}
 
-        {isDriver && profile?.bus_number && (
-          <div className="absolute top-4 left-4 bg-white rounded-lg shadow-lg px-4 py-2">
-            <p className="text-sm text-gray-600">Вы водитель автобуса</p>
-            <p className="font-bold text-blue-600">№{profile.bus_number}</p>
-          </div>
-        )}
+          {activeTab === 'schedule' && (
+            <div className="h-full animate-fade-in">
+              <ScheduleView
+                buses={buses}
+                userLocation={
+                  location.latitude && location.longitude && !location.loading
+                    ? { lat: location.latitude, lng: location.longitude }
+                    : null
+                }
+                isDriver={isDriver}
+                driverBusNumber={profile?.bus_number || null}
+              />
+            </div>
+          )}
 
-        {location.error && (
-          <div className="absolute top-4 right-4 bg-red-500 text-white rounded-lg shadow-lg px-4 py-2 max-w-xs">
-            <p className="text-sm">{location.error}</p>
-          </div>
-        )}
+          {activeTab === 'settings' && user && (
+            <div className="h-full overflow-y-auto pb-20 animate-fade-in">
+              <Settings
+                onClose={() => undefined}
+                onOpenAdmin={() => setShowAdmin(true)}
+              />
+            </div>
+          )}
 
-        {selectedBus && (
-          <BusInfo
-            bus={selectedBus}
-            userLocation={
-              location.latitude && location.longitude
-                ? { lat: location.latitude, lng: location.longitude }
-                : null
-            }
-            onClose={() => setSelectedBus(null)}
-          />
-        )}
+          {!user && activeTab === 'settings' && (
+            <div className="h-full flex items-center justify-center px-6 text-center text-sm text-gray-600 dark:text-gray-400 animate-fade-in">
+              <div>
+                <p className="mb-4">Чтобы изменить профиль и темы, войдите в аккаунт.</p>
+                <button
+                  onClick={() => setShowAuth(true)}
+                  className="px-4 py-2 rounded-full bg-gray-900 dark:bg-gray-700 text-white font-semibold shadow-lg active:scale-95 transition-all hover:bg-gray-800 dark:hover:bg-gray-600"
+                >
+                  Войти
+                </button>
+              </div>
+            </div>
+          )}
+
+          {isDriver && profile?.bus_number && activeTab === 'map' && (
+            <div className="absolute top-4 left-4 bg-white dark:bg-gray-800 rounded-2xl shadow-lg px-4 py-2 text-xs border border-gray-200 dark:border-gray-700 animate-fade-in">
+              <p className="text-gray-600 dark:text-gray-400">Вы водитель автобуса</p>
+              <p className="font-bold text-gray-900 dark:text-gray-100">№{profile.bus_number}</p>
+            </div>
+          )}
+
+          {location.error && (
+            <div className="absolute top-4 right-4 bg-red-600 dark:bg-red-700 text-white rounded-2xl shadow-lg px-4 py-2 max-w-xs text-xs animate-slide-up border border-red-700 dark:border-red-800">
+              <p>{location.error}</p>
+            </div>
+          )}
+
+          {selectedBus && activeTab === 'map' && (
+            <BusInfo
+              bus={selectedBus}
+              userLocation={
+                location.latitude && location.longitude
+                  ? { lat: location.latitude, lng: location.longitude }
+                  : null
+              }
+              onClose={() => setSelectedBus(null)}
+            />
+          )}
+        </div>
       </main>
 
+      {/* Нижняя навигация под мобильный */}
+      <nav className="h-16 bg-white dark:bg-gray-900 border-t border-gray-200 dark:border-gray-700 flex items-center justify-around px-2 sm:px-6 shadow-lg">
+        <button
+          onClick={() => setActiveTab('map')}
+          className={`flex flex-col items-center justify-center flex-1 mx-1 rounded-2xl py-2 text-xs font-medium transition-all duration-300 ${
+            activeTab === 'map'
+              ? 'bg-gray-900 dark:bg-gray-700 text-white shadow-lg scale-105'
+              : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
+          }`}
+        >
+          <Map className={`w-5 h-5 mb-0.5 transition-transform ${activeTab === 'map' ? 'scale-110' : ''}`} />
+          <span className="font-semibold">Карта</span>
+        </button>
+        <button
+          onClick={() => setActiveTab('schedule')}
+          className={`flex flex-col items-center justify-center flex-1 mx-1 rounded-2xl py-2 text-xs font-medium transition-all duration-300 ${
+            activeTab === 'schedule'
+              ? 'bg-gray-900 dark:bg-gray-700 text-white shadow-lg scale-105'
+              : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
+          }`}
+        >
+          <Clock4 className={`w-5 h-5 mb-0.5 transition-transform ${activeTab === 'schedule' ? 'scale-110' : ''}`} />
+          <span className="font-semibold">Расписание</span>
+        </button>
+        <button
+          onClick={() => setActiveTab('settings')}
+          className={`flex flex-col items-center justify-center flex-1 mx-1 rounded-2xl py-2 text-xs font-medium transition-all duration-300 ${
+            activeTab === 'settings'
+              ? 'bg-gray-900 dark:bg-gray-700 text-white shadow-lg scale-105'
+              : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
+          }`}
+        >
+          <SettingsIcon className={`w-5 h-5 mb-0.5 transition-transform ${activeTab === 'settings' ? 'scale-110' : ''}`} />
+          <span className="font-semibold">Настройки</span>
+        </button>
+      </nav>
+
       {showAuth && <Auth onClose={() => setShowAuth(false)} onGuestMode={handleGuestMode} />}
-      {showSettings && user && <Settings onClose={() => setShowSettings(false)} onOpenAdmin={() => setShowAdmin(true)} />}
       {showAdmin && <AdminPanel onClose={() => setShowAdmin(false)} />}
     </div>
   );

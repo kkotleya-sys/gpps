@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react';
-import { X, User, Save, Shield } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { User, Save, Shield, Moon, Sun, Upload, X as XIcon } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { UserRole } from '../types';
+import { supabase } from '../lib/supabase';
 
 interface SettingsProps {
   onClose: () => void;
@@ -9,12 +10,15 @@ interface SettingsProps {
 }
 
 export function Settings({ onClose, onOpenAdmin }: SettingsProps) {
-  const { profile, updateProfile, signOut } = useAuth();
+  const { profile, updateProfile, signOut, user } = useAuth();
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [busNumber, setBusNumber] = useState('');
   const [saving, setSaving] = useState(false);
+  const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const [message, setMessage] = useState('');
+  const [darkMode, setDarkMode] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (profile) {
@@ -23,6 +27,70 @@ export function Settings({ onClose, onOpenAdmin }: SettingsProps) {
       setBusNumber(profile.bus_number || '');
     }
   }, [profile]);
+
+  useEffect(() => {
+    const stored = localStorage.getItem('theme');
+    const isDark = stored === 'dark';
+    setDarkMode(isDark);
+    if (isDark) {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+  }, []);
+
+  const toggleTheme = () => {
+    setDarkMode((prev) => {
+      const next = !prev;
+      if (next) {
+        document.documentElement.classList.add('dark');
+        localStorage.setItem('theme', 'dark');
+      } else {
+        document.documentElement.classList.remove('dark');
+        localStorage.setItem('theme', 'light');
+      }
+      return next;
+    });
+  };
+
+  const handleAvatarUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !user) return;
+
+    if (file.size > 5 * 1024 * 1024) {
+      setMessage('Файл слишком большой (максимум 5 МБ)');
+      setTimeout(() => setMessage(''), 3000);
+      return;
+    }
+
+    setUploadingAvatar(true);
+    try {
+      const fileExt = file.name.split('.').pop();
+      const fileName = `${user.id}-${Date.now()}.${fileExt}`;
+      const filePath = `avatars/${fileName}`;
+
+      const { error: uploadError } = await supabase.storage
+        .from('avatars')
+        .upload(filePath, file, { upsert: true });
+
+      if (uploadError) throw uploadError;
+
+      const { data } = supabase.storage.from('avatars').getPublicUrl(filePath);
+      const avatarUrl = data.publicUrl;
+
+      await updateProfile({ avatar_url: avatarUrl });
+      setMessage('Аватар обновлён');
+      setTimeout(() => setMessage(''), 3000);
+    } catch (error) {
+      setMessage('Ошибка при загрузке аватара');
+      setTimeout(() => setMessage(''), 3000);
+    } finally {
+      setUploadingAvatar(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  };
 
   const handleSave = async () => {
     setSaving(true);
@@ -64,111 +132,167 @@ export function Settings({ onClose, onOpenAdmin }: SettingsProps) {
   };
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto">
-        <div className="sticky top-0 bg-white border-b border-gray-200 p-6 flex items-center justify-between">
-          <h2 className="text-2xl font-bold text-gray-800">Настройки</h2>
-          <button
-            onClick={onClose}
-            className="text-gray-400 hover:text-gray-600 transition-colors"
-          >
-            <X className="w-6 h-6" />
-          </button>
-        </div>
+    <div className="w-full max-w-md mx-auto py-6 px-4 space-y-6 animate-fade-in">
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-50">Настройки</h2>
+      </div>
 
-        <div className="p-6 space-y-6">
-          <div className="flex items-center space-x-4 p-4 bg-gray-50 rounded-xl">
-            <div className="w-16 h-16 bg-blue-500 rounded-full flex items-center justify-center">
-              <User className="w-8 h-8 text-white" />
-            </div>
-            <div>
-              <p className="font-semibold text-gray-800">
-                {profile?.first_name} {profile?.last_name}
-              </p>
-              <p className="text-sm text-gray-600">{profile?.email}</p>
-              <p className="text-xs text-blue-600 font-medium mt-1">
-                {getRoleName(profile?.role || UserRole.USER)}
-              </p>
-            </div>
-          </div>
-
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Имя
-              </label>
-              <input
-                type="text"
-                value={firstName}
-                onChange={(e) => setFirstName(e.target.value)}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Фамилия
-              </label>
-              <input
-                type="text"
-                value={lastName}
-                onChange={(e) => setLastName(e.target.value)}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
-              />
-            </div>
-
-            {profile?.role === UserRole.DRIVER && (
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Номер автобуса
-                </label>
-                <input
-                  type="text"
-                  value={busNumber}
-                  onChange={(e) => setBusNumber(e.target.value)}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
-                  placeholder="1"
+      {/* Профиль с аватаром */}
+      <div className="bg-white dark:bg-gray-800 rounded-3xl p-6 shadow-sm border border-gray-200 dark:border-gray-700">
+        <div className="flex items-center space-x-4 mb-4">
+          <div className="relative">
+            <div className="w-20 h-20 rounded-full bg-gradient-to-br from-gray-700 to-gray-900 dark:from-gray-600 dark:to-gray-800 flex items-center justify-center text-white text-2xl font-bold overflow-hidden border-4 border-white dark:border-gray-700 shadow-lg">
+              {profile?.avatar_url ? (
+                <img
+                  src={profile.avatar_url}
+                  alt="Avatar"
+                  className="w-full h-full object-cover"
                 />
-              </div>
-            )}
-          </div>
-
-          {message && (
-            <div className={`p-4 rounded-lg ${message.includes('Ошибка') ? 'bg-red-50 text-red-600' : 'bg-green-50 text-green-600'}`}>
-              {message}
+              ) : (
+                `${profile?.first_name?.[0] || ''}${profile?.last_name?.[0] || ''}`.toUpperCase() || 'U'
+              )}
             </div>
-          )}
-
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            className="w-full bg-blue-500 text-white py-3 rounded-lg font-semibold hover:bg-blue-600 transition-colors disabled:opacity-50 flex items-center justify-center space-x-2"
-          >
-            <Save className="w-5 h-5" />
-            <span>{saving ? 'Сохранение...' : 'Сохранить'}</span>
-          </button>
-
-          {profile?.role === UserRole.ADMIN && onOpenAdmin && (
             <button
-              onClick={() => {
-                onClose();
-                onOpenAdmin();
-              }}
-              className="w-full bg-purple-500 text-white py-3 rounded-lg font-semibold hover:bg-purple-600 transition-colors flex items-center justify-center space-x-2"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploadingAvatar}
+              className="absolute bottom-0 right-0 w-8 h-8 rounded-full bg-gray-900 dark:bg-gray-700 text-white flex items-center justify-center shadow-lg hover:bg-gray-800 dark:hover:bg-gray-600 transition-colors disabled:opacity-50"
             >
-              <Shield className="w-5 h-5" />
-              <span>Админ панель</span>
+              {uploadingAvatar ? (
+                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+              ) : (
+                <Upload className="w-4 h-4" />
+              )}
             </button>
-          )}
-
-          <button
-            onClick={handleSignOut}
-            className="w-full bg-gray-500 text-white py-3 rounded-lg font-semibold hover:bg-gray-600 transition-colors"
-          >
-            Выйти
-          </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              onChange={handleAvatarUpload}
+              className="hidden"
+            />
+          </div>
+          <div className="flex-1">
+            <p className="font-semibold text-lg text-gray-900 dark:text-gray-50">
+              {profile?.first_name} {profile?.last_name}
+            </p>
+            <p className="text-sm text-gray-600 dark:text-gray-300">{profile?.email}</p>
+            <p className="text-xs text-gray-500 dark:text-gray-400 font-medium mt-1">
+              {getRoleName(profile?.role || UserRole.USER)}
+            </p>
+          </div>
         </div>
       </div>
+
+      <div className="space-y-4">
+        <div className="bg-white dark:bg-gray-800 rounded-3xl p-5 shadow-sm border border-gray-200 dark:border-gray-700">
+          <label className="block text-sm font-semibold text-gray-900 dark:text-gray-50 mb-3">
+            Имя (ник)
+          </label>
+          <input
+            type="text"
+            value={firstName}
+            onChange={(e) => setFirstName(e.target.value)}
+            className="w-full px-5 py-3.5 border border-gray-300 dark:border-gray-600 rounded-2xl bg-gray-50 dark:bg-gray-900 text-base text-gray-900 dark:text-gray-50 focus:ring-2 focus:ring-gray-500 focus:border-transparent outline-none transition-all"
+            placeholder="Введите имя"
+          />
+        </div>
+
+        <div className="bg-white dark:bg-gray-800 rounded-3xl p-5 shadow-sm border border-gray-200 dark:border-gray-700">
+          <label className="block text-sm font-semibold text-gray-900 dark:text-gray-50 mb-3">
+            Фамилия
+          </label>
+          <input
+            type="text"
+            value={lastName}
+            onChange={(e) => setLastName(e.target.value)}
+            className="w-full px-5 py-3.5 border border-gray-300 dark:border-gray-600 rounded-2xl bg-gray-50 dark:bg-gray-900 text-base text-gray-900 dark:text-gray-50 focus:ring-2 focus:ring-gray-500 focus:border-transparent outline-none transition-all"
+            placeholder="Введите фамилию"
+          />
+        </div>
+
+        {profile?.role === UserRole.DRIVER && (
+          <div className="bg-white dark:bg-gray-800 rounded-3xl p-5 shadow-sm border border-gray-200 dark:border-gray-700">
+            <label className="block text-sm font-semibold text-gray-900 dark:text-gray-50 mb-3">
+              Номер автобуса
+            </label>
+            <input
+              type="text"
+              value={busNumber}
+              onChange={(e) => setBusNumber(e.target.value)}
+              className="w-full px-5 py-3.5 border border-gray-300 dark:border-gray-600 rounded-2xl bg-gray-50 dark:bg-gray-900 text-base text-gray-900 dark:text-gray-50 focus:ring-2 focus:ring-gray-500 focus:border-transparent outline-none transition-all"
+              placeholder="1"
+            />
+          </div>
+        )}
+
+        <div className="bg-white dark:bg-gray-800 rounded-3xl p-5 shadow-sm border border-gray-200 dark:border-gray-700">
+          <div className="flex items-center justify-between">
+            <div className="flex-1">
+              <p className="text-base font-semibold text-gray-900 dark:text-gray-50 mb-1">
+                Тема приложения
+              </p>
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                {darkMode ? 'Тёмная тема' : 'Светлая тема'}
+              </p>
+            </div>
+            <button
+              onClick={toggleTheme}
+              className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-gray-100 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 shadow-sm hover:bg-gray-200 dark:hover:bg-gray-600 transition-all active:scale-95"
+            >
+              {darkMode ? (
+                <Moon className="w-6 h-6 text-gray-700 dark:text-gray-300" />
+              ) : (
+                <Sun className="w-6 h-6 text-gray-700 dark:text-gray-300" />
+              )}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {message && (
+        <div
+          className={`p-4 rounded-2xl text-sm animate-slide-up ${
+            message.includes('Ошибка')
+              ? 'bg-red-50 text-red-700 dark:bg-red-900/30 dark:text-red-300'
+              : 'bg-green-50 text-green-700 dark:bg-emerald-900/30 dark:text-emerald-300'
+          }`}
+        >
+          {message}
+        </div>
+      )}
+
+      <button
+        onClick={handleSave}
+        disabled={saving}
+        className="w-full bg-gray-900 dark:bg-gray-700 text-white py-4 rounded-2xl font-semibold hover:bg-gray-800 dark:hover:bg-gray-600 transition-all disabled:opacity-50 flex items-center justify-center space-x-2 text-base shadow-lg active:scale-95"
+      >
+        <Save className="w-5 h-5" />
+        <span>{saving ? 'Сохранение...' : 'Сохранить профиль'}</span>
+      </button>
+
+      {profile?.role === UserRole.DRIVER && (
+        <div className="text-xs text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 rounded-2xl p-4">
+          Для водителя: в разделе «Карта» вы можете создать свой маршрут по остановкам и видеть
+          синюю линию пути автобуса.
+        </div>
+      )}
+
+      {profile?.role === UserRole.ADMIN && onOpenAdmin && (
+        <button
+          onClick={onOpenAdmin}
+          className="w-full bg-gray-800 dark:bg-gray-700 text-white py-4 rounded-2xl font-semibold hover:bg-gray-700 dark:hover:bg-gray-600 transition-all flex items-center justify-center space-x-2 text-base shadow-lg active:scale-95"
+        >
+          <Shield className="w-5 h-5" />
+          <span>Админ панель</span>
+        </button>
+      )}
+
+      <button
+        onClick={handleSignOut}
+        className="w-full bg-gray-600 dark:bg-gray-700 text-white py-4 rounded-2xl font-semibold hover:bg-gray-700 dark:hover:bg-gray-600 transition-all text-base shadow-lg active:scale-95"
+      >
+        Выйти
+      </button>
     </div>
   );
 }

@@ -31,3 +31,21 @@ export interface BusLocation {
 export interface BusWithDriver extends BusLocation {
   driver?: Profile;
 }
+
+export interface Stop {
+  id: string;
+  name: string;
+  latitude: number;
+  longitude: number;
+  created_at: string;
+}
+
+export interface BusStopSchedule {
+  id: string;
+  bus_number: string;
+  stop_id: string;
+  driver_id: string | null;
+  order_index: number;
+  arrival_time: string | null;
+  created_at: string;
+}

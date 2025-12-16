@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { X, Users, Search, Edit2 } from 'lucide-react';
+import { X, Users, Search, Edit2, Trash2 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { Profile, UserRole } from '../types';
 
@@ -74,15 +74,15 @@ export function AdminPanel({ onClose }: AdminPanelProps) {
   const getRoleColor = (role: UserRole) => {
     switch (role) {
       case UserRole.GUEST:
-        return 'bg-gray-100 text-gray-700';
+        return 'bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-300';
       case UserRole.USER:
-        return 'bg-blue-100 text-blue-700';
+        return 'bg-gray-300 text-gray-800 dark:bg-gray-600 dark:text-gray-200';
       case UserRole.DRIVER:
-        return 'bg-green-100 text-green-700';
+        return 'bg-gray-400 text-gray-900 dark:bg-gray-500 dark:text-gray-100';
       case UserRole.ADMIN:
-        return 'bg-purple-100 text-purple-700';
+        return 'bg-gray-800 text-white dark:bg-gray-900 dark:text-gray-100';
       default:
-        return 'bg-gray-100 text-gray-700';
+        return 'bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-300';
     }
   };
 
@@ -93,64 +93,79 @@ export function AdminPanel({ onClose }: AdminPanelProps) {
   );
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-hidden flex flex-col">
-        <div className="bg-gradient-to-r from-purple-500 to-purple-600 p-6 flex items-center justify-between text-white">
+    <div className="fixed inset-0 bg-black/60 dark:bg-black/80 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fade-in">
+      <div className="bg-white dark:bg-gray-900 rounded-3xl shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-hidden flex flex-col border border-gray-200 dark:border-gray-700 animate-scale-in">
+        <div className="bg-gray-900 dark:bg-gray-800 p-6 flex items-center justify-between text-white border-b border-gray-700">
           <div className="flex items-center space-x-3">
-            <Users className="w-8 h-8" />
+            <div className="w-10 h-10 rounded-2xl bg-gray-800 dark:bg-gray-700 flex items-center justify-center">
+              <Users className="w-6 h-6" />
+            </div>
             <div>
               <h2 className="text-2xl font-bold">Админ панель</h2>
-              <p className="text-purple-100 text-sm">Управление пользователями</p>
+              <p className="text-gray-400 text-sm">Управление пользователями</p>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="text-white hover:text-purple-100 transition-colors"
+            className="text-gray-400 hover:text-white transition-colors p-2 hover:bg-gray-800 dark:hover:bg-gray-700 rounded-xl"
           >
             <X className="w-6 h-6" />
           </button>
         </div>
 
-        <div className="p-6 space-y-4 flex-1 overflow-y-auto">
+        <div className="p-6 space-y-4 flex-1 overflow-y-auto bg-gray-50 dark:bg-gray-900">
           <div className="relative">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5" />
+            <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 text-gray-400 dark:text-gray-500 w-5 h-5" />
             <input
               type="text"
               placeholder="Поиск пользователей..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
+              className="w-full pl-12 pr-4 py-3.5 border border-gray-300 dark:border-gray-600 rounded-2xl bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-50 focus:ring-2 focus:ring-gray-500 focus:border-transparent outline-none transition-all"
             />
           </div>
 
           {loading ? (
             <div className="text-center py-12">
-              <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-500 mx-auto"></div>
-              <p className="text-gray-600 mt-4">Загрузка...</p>
+              <div className="animate-spin rounded-full h-12 w-12 border-b-4 border-gray-900 dark:border-gray-100 mx-auto"></div>
+              <p className="text-gray-600 dark:text-gray-400 mt-4">Загрузка...</p>
             </div>
           ) : (
             <div className="space-y-3">
               {filteredProfiles.map((profile) => (
                 <div
                   key={profile.id}
-                  className="bg-white border border-gray-200 rounded-xl p-4 hover:shadow-md transition-shadow"
+                  className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-2xl p-4 hover:shadow-lg transition-all animate-fade-in"
                 >
                   <div className="flex items-center justify-between">
-                    <div className="flex-1">
-                      <div className="flex items-center space-x-3 mb-2">
-                        <h3 className="font-semibold text-gray-800">
-                          {profile.first_name} {profile.last_name}
-                        </h3>
-                        <span className={`px-3 py-1 rounded-full text-xs font-medium ${getRoleColor(profile.role)}`}>
-                          {getRoleName(profile.role)}
-                        </span>
+                    <div className="flex-1 flex items-center space-x-4">
+                      <div className="w-12 h-12 rounded-full bg-gradient-to-br from-gray-700 to-gray-900 dark:from-gray-600 dark:to-gray-800 flex items-center justify-center text-white text-lg font-bold overflow-hidden border-2 border-gray-200 dark:border-gray-700">
+                        {profile.avatar_url ? (
+                          <img
+                            src={profile.avatar_url}
+                            alt="Avatar"
+                            className="w-full h-full object-cover"
+                          />
+                        ) : (
+                          `${profile.first_name?.[0] || ''}${profile.last_name?.[0] || ''}`.toUpperCase() || 'U'
+                        )}
                       </div>
-                      <p className="text-sm text-gray-600">{profile.email}</p>
-                      {profile.bus_number && (
-                        <p className="text-sm text-gray-500 mt-1">
-                          Автобус №{profile.bus_number}
-                        </p>
-                      )}
+                      <div className="flex-1">
+                        <div className="flex items-center space-x-3 mb-2">
+                          <h3 className="font-semibold text-gray-900 dark:text-gray-50">
+                            {profile.first_name} {profile.last_name}
+                          </h3>
+                          <span className={`px-3 py-1 rounded-full text-xs font-medium ${getRoleColor(profile.role)}`}>
+                            {getRoleName(profile.role)}
+                          </span>
+                        </div>
+                        <p className="text-sm text-gray-600 dark:text-gray-400">{profile.email}</p>
+                        {profile.bus_number && (
+                          <p className="text-sm text-gray-500 dark:text-gray-500 mt-1">
+                            Автобус №{profile.bus_number}
+                          </p>
+                        )}
+                      </div>
                     </div>
 
                     <div className="flex items-center space-x-2">
@@ -159,7 +174,7 @@ export function AdminPanel({ onClose }: AdminPanelProps) {
                           <select
                             value={editRole}
                             onChange={(e) => setEditRole(Number(e.target.value) as UserRole)}
-                            className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none"
+                            className="px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-xl text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-50 focus:ring-2 focus:ring-gray-500 outline-none"
                           >
                             <option value={UserRole.USER}>Пользователь</option>
                             <option value={UserRole.DRIVER}>Водитель</option>
@@ -167,13 +182,13 @@ export function AdminPanel({ onClose }: AdminPanelProps) {
                           </select>
                           <button
                             onClick={() => updateUserRole(profile.id, editRole)}
-                            className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors text-sm font-medium"
+                            className="px-4 py-2 bg-gray-900 dark:bg-gray-700 text-white rounded-xl hover:bg-gray-800 dark:hover:bg-gray-600 transition-all text-sm font-medium active:scale-95"
                           >
                             Сохранить
                           </button>
                           <button
                             onClick={() => setEditingId(null)}
-                            className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition-colors text-sm font-medium"
+                            className="px-4 py-2 bg-gray-500 dark:bg-gray-600 text-white rounded-xl hover:bg-gray-600 dark:hover:bg-gray-500 transition-all text-sm font-medium active:scale-95"
                           >
                             Отмена
                           </button>
@@ -185,15 +200,15 @@ export function AdminPanel({ onClose }: AdminPanelProps) {
                               setEditingId(profile.id);
                               setEditRole(profile.role);
                             }}
-                            className="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                            className="p-2.5 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-xl transition-all active:scale-95"
                           >
                             <Edit2 className="w-5 h-5" />
                           </button>
                           <button
                             onClick={() => deleteUser(profile.id)}
-                            className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                            className="p-2.5 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30 rounded-xl transition-all active:scale-95"
                           >
-                            <X className="w-5 h-5" />
+                            <Trash2 className="w-5 h-5" />
                           </button>
                         </>
                       )}
@@ -206,18 +221,18 @@ export function AdminPanel({ onClose }: AdminPanelProps) {
 
           {!loading && filteredProfiles.length === 0 && (
             <div className="text-center py-12">
-              <Users className="w-16 h-16 text-gray-300 mx-auto mb-4" />
-              <p className="text-gray-600">Пользователи не найдены</p>
+              <Users className="w-16 h-16 text-gray-300 dark:text-gray-600 mx-auto mb-4" />
+              <p className="text-gray-600 dark:text-gray-400">Пользователи не найдены</p>
             </div>
           )}
         </div>
 
-        <div className="bg-gray-50 p-4 border-t border-gray-200">
-          <div className="flex items-center justify-between text-sm text-gray-600">
+        <div className="bg-gray-100 dark:bg-gray-800 p-4 border-t border-gray-200 dark:border-gray-700">
+          <div className="flex items-center justify-between text-sm text-gray-700 dark:text-gray-300">
             <span>Всего пользователей: {profiles.length}</span>
             <button
               onClick={fetchProfiles}
-              className="text-purple-600 hover:text-purple-700 font-medium"
+              className="text-gray-900 dark:text-gray-100 hover:text-gray-700 dark:hover:text-gray-300 font-medium transition-colors"
             >
               Обновить
             </button>

@@ -32,6 +32,23 @@
     - Profiles: Users can read all profiles, update only their own
     - Bus locations: Everyone can read, only drivers can insert/update their own
     - Admin policies for admin role
+
+  3. Extended tables for shared stops & schedules
+    - `stops`
+      - `id` (uuid, primary key)
+      - `name` (text)
+      - `latitude` (double precision)
+      - `longitude` (double precision)
+      - `created_at` (timestamptz)
+
+    - `bus_stop_schedules`
+      - `id` (uuid, primary key)
+      - `bus_number` (text)
+      - `stop_id` (uuid, references stops)
+      - `driver_id` (uuid, references profiles)
+      - `order_index` (integer, order of stop in route)
+      - `arrival_time` (text, HH:MM, nullable)
+      - `created_at` (timestamptz)
 */
 
 -- Create profiles table
@@ -62,6 +79,29 @@ CREATE TABLE IF NOT EXISTS bus_locations (
 -- Enable RLS
 ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE bus_locations ENABLE ROW LEVEL SECURITY;
+
+-- Create stops table
+CREATE TABLE IF NOT EXISTS stops (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name text NOT NULL,
+  latitude double precision NOT NULL,
+  longitude double precision NOT NULL,
+  created_at timestamptz DEFAULT now()
+);
+
+-- Create bus_stop_schedules table
+CREATE TABLE IF NOT EXISTS bus_stop_schedules (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  bus_number text NOT NULL,
+  stop_id uuid NOT NULL REFERENCES stops(id) ON DELETE CASCADE,
+  driver_id uuid REFERENCES profiles(id) ON DELETE SET NULL,
+  order_index integer NOT NULL DEFAULT 0,
+  arrival_time text,
+  created_at timestamptz DEFAULT now()
+);
+
+ALTER TABLE stops ENABLE ROW LEVEL SECURITY;
+ALTER TABLE bus_stop_schedules ENABLE ROW LEVEL SECURITY;
 
 -- Profiles policies
 CREATE POLICY "Anyone can view profiles"
@@ -118,6 +158,52 @@ CREATE POLICY "Drivers can delete their location"
   TO authenticated
   USING (driver_id = auth.uid());
 
+-- Stops policies
+CREATE POLICY "Anyone can view stops"
+  ON stops FOR SELECT
+  TO authenticated
+  USING (true);
+
+CREATE POLICY "Drivers and admins can manage stops"
+  ON stops FOR ALL
+  TO authenticated
+  USING (
+    EXISTS (
+      SELECT 1 FROM profiles
+      WHERE id = auth.uid() AND role IN (2, 5)
+    )
+  )
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM profiles
+      WHERE id = auth.uid() AND role IN (2, 5)
+    )
+  );
+
+-- Bus stop schedules policies
+CREATE POLICY "Anyone can view bus stop schedules"
+  ON bus_stop_schedules FOR SELECT
+  TO authenticated
+  USING (true);
+
+CREATE POLICY "Drivers can manage their own bus schedules"
+  ON bus_stop_schedules FOR ALL
+  TO authenticated
+  USING (
+    driver_id = auth.uid()
+    OR EXISTS (
+      SELECT 1 FROM profiles
+      WHERE id = auth.uid() AND role = 5
+    )
+  )
+  WITH CHECK (
+    driver_id = auth.uid()
+    OR EXISTS (
+      SELECT 1 FROM profiles
+      WHERE id = auth.uid() AND role = 5
+    )
+  );
+
 -- Create function to automatically update updated_at
 CREATE OR REPLACE FUNCTION update_updated_at_column()
 RETURNS TRIGGER AS $$
@@ -138,7 +224,15 @@ CREATE TRIGGER update_bus_locations_updated_at
   FOR EACH ROW
   EXECUTE FUNCTION update_updated_at_column();
 
+CREATE TRIGGER update_bus_stop_schedules_updated_at
+  BEFORE UPDATE ON bus_stop_schedules
+  FOR EACH ROW
+  EXECUTE FUNCTION update_updated_at_column();
+
 -- Create index for faster queries
 CREATE INDEX IF NOT EXISTS bus_locations_driver_id_idx ON bus_locations(driver_id);
 CREATE INDEX IF NOT EXISTS bus_locations_updated_at_idx ON bus_locations(updated_at);
 CREATE INDEX IF NOT EXISTS profiles_role_idx ON profiles(role);
+CREATE INDEX IF NOT EXISTS stops_name_idx ON stops(name);
+CREATE INDEX IF NOT EXISTS bus_stop_schedules_bus_idx ON bus_stop_schedules(bus_number);
+CREATE INDEX IF NOT EXISTS bus_stop_schedules_stop_idx ON bus_stop_schedules(stop_id);
