@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
-import { MapPin, LogIn, Map, Clock4, Settings as SettingsIcon } from 'lucide-react';
+import { MapPin, LogIn, Map, Clock4, Settings as SettingsIcon, Globe } from 'lucide-react';
 import { useAuth } from './contexts/AuthContext';
+import { useLanguage, Language } from './contexts/LanguageContext';
 import { useGeolocation } from './hooks/useGeolocation';
 import { supabase } from './lib/supabase';
 import { MapView } from './components/MapView';
@@ -15,12 +16,23 @@ type MainTab = 'map' | 'schedule' | 'settings';
 
 function App() {
   const { user, profile, loading: authLoading } = useAuth();
+  const { t, language, setLanguage } = useLanguage();
   const [showAuth, setShowAuth] = useState(false);
   const [showAdmin, setShowAdmin] = useState(false);
   const [buses, setBuses] = useState<BusWithDriver[]>([]);
   const [selectedBus, setSelectedBus] = useState<BusWithDriver | null>(null);
   const [guestMode, setGuestMode] = useState(false);
   const [activeTab, setActiveTab] = useState<MainTab>('map');
+  const [languageChanging, setLanguageChanging] = useState(false);
+
+  const handleLanguageChange = (lang: Language) => {
+    if (lang === language) return;
+    setLanguageChanging(true);
+    setTimeout(() => {
+      setLanguage(lang);
+      setTimeout(() => setLanguageChanging(false), 200);
+    }, 200);
+  };
 
   const isDriver = profile?.role === UserRole.DRIVER;
   const location = useGeolocation(!!user || guestMode);
@@ -127,21 +139,95 @@ function App() {
             <div>
               <h1 className="text-lg font-bold text-gray-900 dark:text-gray-50">Душанбе Транспорт</h1>
               <p className="text-xs text-gray-600 dark:text-gray-400">
-                {profile ? `${profile.first_name} ${profile.last_name}` : 'Гость'}
+                {profile ? `${profile.first_name} ${profile.last_name}` : t('auth.guest')}
               </p>
             </div>
           </div>
 
           {!user && !guestMode && (
-            <button
-              onClick={() => setShowAuth(true)}
-              className="px-3 py-1.5 rounded-full text-xs font-semibold bg-gray-900 dark:bg-gray-700 text-white shadow-sm active:scale-95 transition-all hover:bg-gray-800 dark:hover:bg-gray-600"
-            >
-              <span className="inline-flex items-center space-x-1">
-                <LogIn className="w-4 h-4" />
-                <span>Войти</span>
-              </span>
-            </button>
+            <div className="flex items-center space-x-2">
+              {/* Language Switcher for Guests */}
+              <div className="flex items-center space-x-1 bg-gray-100 dark:bg-gray-800 rounded-full px-2 py-1">
+                <button
+                  onClick={() => handleLanguageChange('ru')}
+                  className={`px-2 py-0.5 rounded-lg text-[10px] font-semibold transition-all ${
+                    language === 'ru'
+                      ? 'bg-gray-900 dark:bg-gray-700 text-white'
+                      : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200'
+                  }`}
+                >
+                  RU
+                </button>
+                <button
+                  onClick={() => handleLanguageChange('tj')}
+                  className={`px-2 py-0.5 rounded-lg text-[10px] font-semibold transition-all ${
+                    language === 'tj'
+                      ? 'bg-gray-900 dark:bg-gray-700 text-white'
+                      : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200'
+                  }`}
+                >
+                  TJ
+                </button>
+                <button
+                  onClick={() => handleLanguageChange('eng')}
+                  className={`px-2 py-0.5 rounded-lg text-[10px] font-semibold transition-all ${
+                    language === 'eng'
+                      ? 'bg-gray-900 dark:bg-gray-700 text-white'
+                      : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200'
+                  }`}
+                >
+                  ENG
+                </button>
+              </div>
+              
+              <button
+                onClick={() => setShowAuth(true)}
+                className="px-3 py-1.5 rounded-full text-xs font-semibold bg-gray-900 dark:bg-gray-700 text-white shadow-sm active:scale-95 transition-all hover:bg-gray-800 dark:hover:bg-gray-600"
+              >
+                <span className="inline-flex items-center space-x-1">
+                  <LogIn className="w-4 h-4" />
+                  <span>{t('auth.login')}</span>
+                </span>
+              </button>
+            </div>
+          )}
+          
+          {guestMode && (
+            <div className="flex items-center space-x-2">
+              {/* Language Switcher for Guest Mode */}
+              <div className="flex items-center space-x-1 bg-gray-100 dark:bg-gray-800 rounded-full px-2 py-1">
+                <button
+                  onClick={() => handleLanguageChange('ru')}
+                  className={`px-2 py-0.5 rounded-lg text-[10px] font-semibold transition-all ${
+                    language === 'ru'
+                      ? 'bg-gray-900 dark:bg-gray-700 text-white'
+                      : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200'
+                  }`}
+                >
+                  RU
+                </button>
+                <button
+                  onClick={() => handleLanguageChange('tj')}
+                  className={`px-2 py-0.5 rounded-lg text-[10px] font-semibold transition-all ${
+                    language === 'tj'
+                      ? 'bg-gray-900 dark:bg-gray-700 text-white'
+                      : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200'
+                  }`}
+                >
+                  TJ
+                </button>
+                <button
+                  onClick={() => handleLanguageChange('eng')}
+                  className={`px-2 py-0.5 rounded-lg text-[10px] font-semibold transition-all ${
+                    language === 'eng'
+                      ? 'bg-gray-900 dark:bg-gray-700 text-white'
+                      : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200'
+                  }`}
+                >
+                  ENG
+                </button>
+              </div>
+            </div>
           )}
         </div>
       </header>
@@ -192,12 +278,12 @@ function App() {
           {!user && activeTab === 'settings' && (
             <div className="h-full flex items-center justify-center px-6 text-center text-sm text-gray-600 dark:text-gray-400 animate-fade-in">
               <div>
-                <p className="mb-4">Чтобы изменить профиль и темы, войдите в аккаунт.</p>
+                <p className="mb-4">{t('settings.title')}</p>
                 <button
                   onClick={() => setShowAuth(true)}
                   className="px-4 py-2 rounded-full bg-gray-900 dark:bg-gray-700 text-white font-semibold shadow-lg active:scale-95 transition-all hover:bg-gray-800 dark:hover:bg-gray-600"
                 >
-                  Войти
+                  {t('auth.login')}
                 </button>
               </div>
             </div>
@@ -205,8 +291,8 @@ function App() {
 
           {isDriver && profile?.bus_number && activeTab === 'map' && (
             <div className="absolute top-4 left-4 bg-white dark:bg-gray-800 rounded-2xl shadow-lg px-4 py-2 text-xs border border-gray-200 dark:border-gray-700 animate-fade-in">
-              <p className="text-gray-600 dark:text-gray-400">Вы водитель автобуса</p>
-              <p className="font-bold text-gray-900 dark:text-gray-100">№{profile.bus_number}</p>
+              <p className="text-gray-600 dark:text-gray-400">{t('driver.youAreDriver')}</p>
+              <p className="font-bold text-gray-900 dark:text-gray-100">{t('map.busNumber')}{profile.bus_number}</p>
             </div>
           )}
 
@@ -241,7 +327,7 @@ function App() {
           }`}
         >
           <Map className={`w-5 h-5 mb-0.5 transition-transform ${activeTab === 'map' ? 'scale-110' : ''}`} />
-          <span className="font-semibold">Карта</span>
+          <span className="font-semibold">{t('nav.map')}</span>
         </button>
         <button
           onClick={() => setActiveTab('schedule')}
@@ -252,7 +338,7 @@ function App() {
           }`}
         >
           <Clock4 className={`w-5 h-5 mb-0.5 transition-transform ${activeTab === 'schedule' ? 'scale-110' : ''}`} />
-          <span className="font-semibold">Расписание</span>
+          <span className="font-semibold">{t('nav.schedule')}</span>
         </button>
         <button
           onClick={() => setActiveTab('settings')}
@@ -263,7 +349,7 @@ function App() {
           }`}
         >
           <SettingsIcon className={`w-5 h-5 mb-0.5 transition-transform ${activeTab === 'settings' ? 'scale-110' : ''}`} />
-          <span className="font-semibold">Настройки</span>
+          <span className="font-semibold">{t('nav.settings')}</span>
         </button>
       </nav>
 

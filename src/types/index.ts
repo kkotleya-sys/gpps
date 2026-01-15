@@ -49,3 +49,51 @@ export interface BusStopSchedule {
   arrival_time: string | null;
   created_at: string;
 }
+
+export interface Route {
+  id: string;
+  bus_number: string;
+  driver_id: string;
+  name: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RouteStop {
+  id: string;
+  route_id: string;
+  stop_id: string;
+  order_index: number;
+  arrival_time: string | null;
+  created_at: string;
+}
+
+export interface BusProfile {
+  id: string;
+  bus_number: string;
+  driver_id: string | null;
+  description: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BusMedia {
+  id: string;
+  bus_number: string;
+  media_type: 'photo' | 'video';
+  media_url: string;
+  order_index: number;
+  created_at: string;
+}
+
+export interface Review {
+  id: string;
+  bus_number: string;
+  user_id: string;
+  rating: number;
+  comment: string | null;
+  created_at: string;
+  updated_at: string;
+  user?: Profile;
+}

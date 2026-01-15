@@ -2,6 +2,9 @@ import { useEffect, useMemo, useState } from 'react';
 import { Clock4, Navigation, Route, Search } from 'lucide-react';
 import { BusStopSchedule, BusWithDriver, Stop } from '../types';
 import { supabase } from '../lib/supabase';
+import { useLanguage } from '../contexts/LanguageContext';
+import { RouteManager } from './RouteManager';
+import { useAuth } from '../contexts/AuthContext';
 
 interface ScheduleViewProps {
   buses: BusWithDriver[];
@@ -35,6 +38,8 @@ export function ScheduleView({
   isDriver,
   driverBusNumber,
 }: ScheduleViewProps) {
+  const { t } = useLanguage();
+  const { user } = useAuth();
   const [stops, setStops] = useState<Stop[]>([]);
   const [schedules, setSchedules] = useState<BusStopSchedule[]>([]);
   const [newStopName, setNewStopName] = useState('');
@@ -341,84 +346,27 @@ export function ScheduleView({
       <div className="px-4 pt-4 pb-2">
         <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-50 flex items-center space-x-2">
           <Clock4 className="w-5 h-5 text-gray-700 dark:text-gray-300" />
-          <span>Расписание и маршруты</span>
+          <span>{t('schedule.title')}</span>
         </h2>
         <p className="mt-1 text-xs text-gray-600 dark:text-gray-400">
-          Здесь вы можете увидеть ближайшие автобусы, расписание остановок и подобрать маршрут с пересадками.
+          {t('schedule.title')}
         </p>
       </div>
 
       <div className="flex-1 overflow-y-auto px-4 pb-24 space-y-4">
-        {isDriver && driverBusNumber && (
+        {isDriver && driverBusNumber && user && (
           <section className="bg-white dark:bg-gray-800 rounded-3xl p-4 shadow-sm border border-gray-200 dark:border-gray-700 animate-fade-in">
-            <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-50 mb-2">
-              Моё расписание (автобус №{driverBusNumber})
+            <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-50 mb-4">
+              {t('schedule.mySchedule')} ({t('map.busNumber')}{driverBusNumber})
             </h3>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mb-3">
-              Добавьте остановки и время прибытия. Данные сохраняются на сервере и доступны всем пассажирам.
-            </p>
-
-            <div className="space-y-2 mb-3">
-              <input
-                className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-900 text-sm outline-none focus:ring-2 focus:ring-gray-500 text-gray-900 dark:text-gray-50 transition-all"
-                placeholder="Название остановки (например, Автовокзал)"
-                value={newStopName}
-                onChange={(e) => setNewStopName(e.target.value)}
-              />
-              <input
-                className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-900 text-sm outline-none focus:ring-2 focus:ring-gray-500 text-gray-900 dark:text-gray-50 transition-all"
-                placeholder="Время прибытия (например, 08:30)"
-                value={newStopTime}
-                onChange={(e) => setNewStopTime(e.target.value)}
-              />
-              <button
-                onClick={addDriverStop}
-                disabled={savingStop}
-                className="w-full mt-1 bg-gray-900 dark:bg-gray-700 text-white rounded-xl py-2 text-sm font-semibold active:scale-95 transition-all hover:bg-gray-800 dark:hover:bg-gray-600 disabled:opacity-50 shadow-lg"
-              >
-                {savingStop ? 'Сохранение...' : 'Добавить остановку в расписание'}
-              </button>
-            </div>
-
-            {driverSchedules.length > 0 ? (
-              <div className="space-y-1 max-h-48 overflow-y-auto">
-                {driverSchedules.map(({ schedule, stop }) => (
-                  <div
-                    key={schedule.id}
-                    className="flex items-center justify-between rounded-2xl bg-gray-100 dark:bg-gray-800 px-3 py-2 text-xs border border-gray-200 dark:border-gray-700"
-                  >
-                    <div>
-                      <p className="font-semibold text-gray-900 dark:text-gray-50">
-                        {stop.name}
-                      </p>
-                      <p className="text-gray-500 dark:text-gray-400">
-                        Прибытие: {schedule.arrival_time || '—'}
-                      </p>
-                    </div>
-                    <button
-                      onClick={() => removeDriverStop(schedule.id)}
-                      className="text-red-500 text-[11px] font-medium"
-                    >
-                      Удалить
-                    </button>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="rounded-2xl bg-gray-100 dark:bg-gray-800 px-4 py-6 text-center">
-                <Clock4 className="w-8 h-8 text-gray-400 dark:text-gray-500 mx-auto mb-2" />
-                <p className="text-xs text-gray-500 dark:text-gray-400">
-                  Расписание пусто. Добавьте остановки и время прибытия.
-                </p>
-              </div>
-            )}
+            <RouteManager busNumber={driverBusNumber} driverId={user.id} />
           </section>
         )}
 
         <section className="bg-white dark:bg-slate-800 rounded-3xl p-4 shadow-sm">
           <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-50 mb-2 flex items-center space-x-2">
             <Navigation className="w-4 h-4 text-gray-700 dark:text-gray-300" />
-            <span>Ближайшие автобусы до вас</span>
+            <span>{t('schedule.nearestBuses')}</span>
           </h3>
           {!userLocation && (
             <p className="text-xs text-slate-500 dark:text-slate-400">
@@ -459,7 +407,7 @@ export function ScheduleView({
         <section className="bg-white dark:bg-slate-800 rounded-3xl p-4 shadow-sm space-y-3">
           <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-50 mb-1 flex items-center space-x-2">
             <Search className="w-4 h-4 text-gray-700 dark:text-gray-300" />
-            <span>Найти автобус по остановке</span>
+            <span>{t('schedule.findByStop')}</span>
           </h3>
           <input
             className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-900 text-sm outline-none focus:ring-2 focus:ring-gray-500 text-gray-900 dark:text-gray-50 transition-all"
@@ -498,12 +446,12 @@ export function ScheduleView({
         <section className="bg-white dark:bg-slate-800 rounded-3xl p-4 shadow-sm space-y-3">
           <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-50 mb-1 flex items-center space-x-2">
             <Route className="w-4 h-4 text-gray-700 dark:text-gray-300" />
-            <span>Маршрут с пересадками</span>
+            <span>{t('schedule.routeWithTransfers')}</span>
           </h3>
           <div className="grid grid-cols-2 gap-2">
             <div>
               <label className="block text-[10px] text-gray-500 dark:text-gray-400 mb-1">
-                Откуда
+                {t('schedule.from')}
               </label>
               <input
                 className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-900 text-xs outline-none focus:ring-2 focus:ring-gray-500 text-gray-900 dark:text-gray-50 transition-all"
@@ -515,7 +463,7 @@ export function ScheduleView({
             </div>
             <div>
               <label className="block text-[10px] text-gray-500 dark:text-gray-400 mb-1">
-                Куда
+                {t('schedule.to')}
               </label>
               <input
                 className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-900 text-xs outline-none focus:ring-2 focus:ring-gray-500 text-gray-900 dark:text-gray-50 transition-all"

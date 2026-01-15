@@ -75,6 +75,24 @@
   .animate-slide-in-left {
     animation: slide-in-left 0.3s ease-out;
   }
+
+  @keyframes language-transition {
+    0% {
+      opacity: 0;
+      transform: translateY(-10px);
+    }
+    50% {
+      opacity: 0.5;
+    }
+    100% {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .animate-language-transition {
+    animation: language-transition 0.4s ease-out;
+  }
 }
 
 body {

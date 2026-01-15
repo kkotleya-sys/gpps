@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
-import { User, Save, Shield, Moon, Sun, Upload, X as XIcon } from 'lucide-react';
+import { User, Save, Shield, Moon, Sun, Upload, X as XIcon, Globe } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { useLanguage, Language } from '../contexts/LanguageContext';
 import { UserRole } from '../types';
 import { supabase } from '../lib/supabase';
 
@@ -11,6 +12,7 @@ interface SettingsProps {
 
 export function Settings({ onClose, onOpenAdmin }: SettingsProps) {
   const { profile, updateProfile, signOut, user } = useAuth();
+  const { language, setLanguage, t } = useLanguage();
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [busNumber, setBusNumber] = useState('');
@@ -18,6 +20,7 @@ export function Settings({ onClose, onOpenAdmin }: SettingsProps) {
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const [message, setMessage] = useState('');
   const [darkMode, setDarkMode] = useState(false);
+  const [languageChanging, setLanguageChanging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -51,6 +54,15 @@ export function Settings({ onClose, onOpenAdmin }: SettingsProps) {
       }
       return next;
     });
+  };
+
+  const handleLanguageChange = (lang: Language) => {
+    if (lang === language) return;
+    setLanguageChanging(true);
+    setTimeout(() => {
+      setLanguage(lang);
+      setTimeout(() => setLanguageChanging(false), 200);
+    }, 200);
   };
 
   const handleAvatarUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -132,9 +144,9 @@ export function Settings({ onClose, onOpenAdmin }: SettingsProps) {
   };
 
   return (
-    <div className="w-full max-w-md mx-auto py-6 px-4 space-y-6 animate-fade-in">
+    <div className={`w-full max-w-md mx-auto py-6 px-4 space-y-6 ${languageChanging ? 'opacity-50' : 'animate-fade-in'} transition-opacity duration-300`}>
       <div className="flex items-center justify-between mb-4">
-        <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-50">Настройки</h2>
+        <h2 className={`text-2xl font-bold text-gray-900 dark:text-gray-50 animate-language-transition`}>{t('settings.title')}</h2>
       </div>
 
       {/* Профиль с аватаром */}
@@ -186,34 +198,34 @@ export function Settings({ onClose, onOpenAdmin }: SettingsProps) {
       <div className="space-y-4">
         <div className="bg-white dark:bg-gray-800 rounded-3xl p-5 shadow-sm border border-gray-200 dark:border-gray-700">
           <label className="block text-sm font-semibold text-gray-900 dark:text-gray-50 mb-3">
-            Имя (ник)
+            {t('settings.firstName')}
           </label>
           <input
             type="text"
             value={firstName}
             onChange={(e) => setFirstName(e.target.value)}
             className="w-full px-5 py-3.5 border border-gray-300 dark:border-gray-600 rounded-2xl bg-gray-50 dark:bg-gray-900 text-base text-gray-900 dark:text-gray-50 focus:ring-2 focus:ring-gray-500 focus:border-transparent outline-none transition-all"
-            placeholder="Введите имя"
+            placeholder={t('settings.firstName')}
           />
         </div>
 
         <div className="bg-white dark:bg-gray-800 rounded-3xl p-5 shadow-sm border border-gray-200 dark:border-gray-700">
           <label className="block text-sm font-semibold text-gray-900 dark:text-gray-50 mb-3">
-            Фамилия
+            {t('settings.lastName')}
           </label>
           <input
             type="text"
             value={lastName}
             onChange={(e) => setLastName(e.target.value)}
             className="w-full px-5 py-3.5 border border-gray-300 dark:border-gray-600 rounded-2xl bg-gray-50 dark:bg-gray-900 text-base text-gray-900 dark:text-gray-50 focus:ring-2 focus:ring-gray-500 focus:border-transparent outline-none transition-all"
-            placeholder="Введите фамилию"
+            placeholder={t('settings.lastName')}
           />
         </div>
 
         {profile?.role === UserRole.DRIVER && (
           <div className="bg-white dark:bg-gray-800 rounded-3xl p-5 shadow-sm border border-gray-200 dark:border-gray-700">
             <label className="block text-sm font-semibold text-gray-900 dark:text-gray-50 mb-3">
-              Номер автобуса
+              {t('settings.busNumber')}
             </label>
             <input
               type="text"
@@ -226,13 +238,56 @@ export function Settings({ onClose, onOpenAdmin }: SettingsProps) {
         )}
 
         <div className="bg-white dark:bg-gray-800 rounded-3xl p-5 shadow-sm border border-gray-200 dark:border-gray-700">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex-1">
+              <p className="text-base font-semibold text-gray-900 dark:text-gray-50 mb-1 flex items-center space-x-2">
+                <Globe className="w-5 h-5" />
+                <span>{t('settings.language')}</span>
+              </p>
+            </div>
+          </div>
+          <div className="flex space-x-2">
+            <button
+              onClick={() => handleLanguageChange('ru')}
+              className={`flex-1 px-4 py-2.5 rounded-xl font-semibold transition-all ${
+                language === 'ru'
+                  ? 'bg-gray-900 dark:bg-gray-700 text-white shadow-lg'
+                  : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'
+              }`}
+            >
+              RU
+            </button>
+            <button
+              onClick={() => handleLanguageChange('tj')}
+              className={`flex-1 px-4 py-2.5 rounded-xl font-semibold transition-all ${
+                language === 'tj'
+                  ? 'bg-gray-900 dark:bg-gray-700 text-white shadow-lg'
+                  : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'
+              }`}
+            >
+              TJ
+            </button>
+            <button
+              onClick={() => handleLanguageChange('eng')}
+              className={`flex-1 px-4 py-2.5 rounded-xl font-semibold transition-all ${
+                language === 'eng'
+                  ? 'bg-gray-900 dark:bg-gray-700 text-white shadow-lg'
+                  : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'
+              }`}
+            >
+              ENG
+            </button>
+          </div>
+        </div>
+
+        <div className="bg-white dark:bg-gray-800 rounded-3xl p-5 shadow-sm border border-gray-200 dark:border-gray-700">
           <div className="flex items-center justify-between">
             <div className="flex-1">
               <p className="text-base font-semibold text-gray-900 dark:text-gray-50 mb-1">
-                Тема приложения
+                {t('settings.theme')}
               </p>
               <p className="text-xs text-gray-500 dark:text-gray-400">
-                {darkMode ? 'Тёмная тема' : 'Светлая тема'}
+                {darkMode ? t('settings.darkTheme') : t('settings.lightTheme')}
               </p>
             </div>
             <button
@@ -267,7 +322,7 @@ export function Settings({ onClose, onOpenAdmin }: SettingsProps) {
         className="w-full bg-gray-900 dark:bg-gray-700 text-white py-4 rounded-2xl font-semibold hover:bg-gray-800 dark:hover:bg-gray-600 transition-all disabled:opacity-50 flex items-center justify-center space-x-2 text-base shadow-lg active:scale-95"
       >
         <Save className="w-5 h-5" />
-        <span>{saving ? 'Сохранение...' : 'Сохранить профиль'}</span>
+        <span>{saving ? t('common.loading') : t('settings.saveProfile')}</span>
       </button>
 
       {profile?.role === UserRole.DRIVER && (
@@ -291,7 +346,7 @@ export function Settings({ onClose, onOpenAdmin }: SettingsProps) {
         onClick={handleSignOut}
         className="w-full bg-gray-600 dark:bg-gray-700 text-white py-4 rounded-2xl font-semibold hover:bg-gray-700 dark:hover:bg-gray-600 transition-all text-base shadow-lg active:scale-95"
       >
-        Выйти
+        {t('auth.logout')}
       </button>
     </div>
   );
