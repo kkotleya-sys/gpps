@@ -69,43 +69,76 @@ export function RouteManager({ busNumber, driverId }: RouteManagerProps) {
   const handleCreateRoute = async () => {
     if (!newRouteName.trim() || newRouteStops.length === 0) return;
 
-    const { data: route, error } = await supabase
-      .from('routes')
-      .insert({
-        bus_number: busNumber,
-        driver_id: driverId,
-        name: newRouteName.trim(),
-        is_active: false,
-      })
-      .select()
-      .single();
+    try {
+      const { data: route, error: routeError } = await supabase
+        .from('routes')
+        .insert({
+          bus_number: busNumber,
+          driver_id: driverId,
+          name: newRouteName.trim(),
+          is_active: false,
+        })
+        .select()
+        .single();
 
-    if (error || !route) return;
+      if (routeError || !route) {
+        console.error('Error creating route:', routeError);
+        alert('Ошибка при создании маршрута');
+        return;
+      }
 
-    // Add stops to route
-    for (let i = 0; i < newRouteStops.length; i++) {
-      await supabase.from('route_stops').insert({
-        route_id: route.id,
-        stop_id: newRouteStops[i].stop.id,
-        order_index: i,
-        arrival_time: newRouteStops[i].time || null,
-      });
+      // Add stops to route
+      for (let i = 0; i < newRouteStops.length; i++) {
+        const { error: stopError } = await supabase.from('route_stops').insert({
+          route_id: route.id,
+          stop_id: newRouteStops[i].stop.id,
+          order_index: i,
+          arrival_time: newRouteStops[i].time.trim() || null,
+        });
+        
+        if (stopError) {
+          console.error('Error adding stop to route:', stopError);
+        }
+      }
+
+      setCreatingRoute(false);
+      setNewRouteName('');
+      setNewRouteStops([]);
+      setCurrentStopInput('');
+      setCurrentTimeInput('');
+      await fetchRoutes();
+      await fetchRouteStops();
+    } catch (error: any) {
+      console.error('Error creating route:', error);
+      alert(`Ошибка при создании маршрута: ${error.message || 'Неизвестная ошибка'}`);
     }
-
-    setCreatingRoute(false);
-    setNewRouteName('');
-    setNewRouteStops([]);
   };
 
   const handleToggleRoute = async (routeId: string, currentActive: boolean) => {
-    await supabase
-      .from('routes')
-      .update({ is_active: !currentActive })
-      .eq('id', routeId);
+    try {
+      const { error } = await supabase
+        .from('routes')
+        .update({ is_active: !currentActive })
+        .eq('id', routeId);
+      
+      if (error) {
+        console.error('Error toggling route:', error);
+        alert('Ошибка при переключении маршрута');
+      } else {
+        await fetchRoutes();
+      }
+    } catch (error) {
+      console.error('Error toggling route:', error);
+      alert('Ошибка при переключении маршрута');
+    }
   };
 
   const handleAddStopToNewRoute = (stop: Stop) => {
-    setNewRouteStops([...newRouteStops, { stop, time: currentTimeInput }]);
+    if (!stop || !stop.id) {
+      console.error('Invalid stop:', stop);
+      return;
+    }
+    setNewRouteStops([...newRouteStops, { stop, time: currentTimeInput.trim() }]);
     setCurrentStopInput('');
     setCurrentTimeInput('');
   };
@@ -115,14 +148,26 @@ export function RouteManager({ busNumber, driverId }: RouteManagerProps) {
   };
 
   const handleAddNewStop = async (name: string, lat: number, lng: number) => {
-    const { data: newStop } = await supabase
-      .from('stops')
-      .insert({ name, latitude: lat, longitude: lng })
-      .select()
-      .single();
-    
-    if (newStop) {
-      handleAddStopToNewRoute(newStop as Stop);
+    try {
+      const { data: newStop, error } = await supabase
+        .from('stops')
+        .insert({ name, latitude: lat, longitude: lng })
+        .select()
+        .single();
+      
+      if (error) {
+        console.error('Error adding stop:', error);
+        alert(`Ошибка при добавлении остановки: ${error.message}`);
+        return;
+      }
+      
+      if (newStop) {
+        handleAddStopToNewRoute(newStop as Stop);
+        await fetchStops(); // Refresh stops list
+      }
+    } catch (error: any) {
+      console.error('Error adding stop:', error);
+      alert(`Ошибка при добавлении остановки: ${error.message || 'Неизвестная ошибка'}`);
     }
   };
 

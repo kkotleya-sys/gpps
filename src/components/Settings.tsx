@@ -79,16 +79,30 @@ export function Settings({ onClose, onOpenAdmin }: SettingsProps) {
     try {
       const fileExt = file.name.split('.').pop();
       const fileName = `${user.id}-${Date.now()}.${fileExt}`;
-      const filePath = `avatars/${fileName}`;
+      // Use user ID as folder to match RLS policy
+      const filePath = `${user.id}/${fileName}`;
+
+      // Delete old avatar if exists
+      const { data: listData } = await supabase.storage
+        .from('avatars')
+        .list(user.id);
+      
+      if (listData && listData.length > 0) {
+        const filesToDelete = listData.map(f => `${user.id}/${f.name}`);
+        await supabase.storage.from('avatars').remove(filesToDelete);
+      }
 
       const { error: uploadError } = await supabase.storage
         .from('avatars')
         .upload(filePath, file, { upsert: true });
 
-      if (uploadError) throw uploadError;
+      if (uploadError) {
+        console.error('Upload error:', uploadError);
+        throw uploadError;
+      }
 
-      const { data } = supabase.storage.from('avatars').getPublicUrl(filePath);
-      const avatarUrl = data.publicUrl;
+      const { data: urlData } = supabase.storage.from('avatars').getPublicUrl(filePath);
+      const avatarUrl = urlData.publicUrl;
 
       await updateProfile({ avatar_url: avatarUrl });
       setMessage('Аватар обновлён');

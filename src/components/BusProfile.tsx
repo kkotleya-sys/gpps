@@ -6,14 +6,6 @@ import { supabase } from '../lib/supabase';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useAuth } from '../contexts/AuthContext';
 
-// Dynamic import for GLTFLoader to avoid SSR issues
-let GLTFLoader: any = null;
-if (typeof window !== 'undefined') {
-  import('three/examples/jsm/loaders/GLTFLoader.js').then((module) => {
-    GLTFLoader = module.GLTFLoader;
-  });
-}
-
 interface BusProfileProps {
   bus: BusWithDriver;
   onClose: () => void;
@@ -55,24 +47,51 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
     fetchStops();
 
     const profileChannel = supabase
-      .channel('bus_profile_channel')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'bus_profiles' }, () => {
-        fetchBusProfile();
-      })
+      .channel(`bus_profile_${bus.bus_number}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'bus_profiles',
+          filter: `bus_number=eq.${bus.bus_number}`,
+        },
+        () => {
+          fetchBusProfile();
+        }
+      )
       .subscribe();
 
     const mediaChannel = supabase
-      .channel('bus_media_channel')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'bus_media' }, () => {
-        fetchMedia();
-      })
+      .channel(`bus_media_${bus.bus_number}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'bus_media',
+          filter: `bus_number=eq.${bus.bus_number}`,
+        },
+        () => {
+          fetchMedia();
+        }
+      )
       .subscribe();
 
     const reviewsChannel = supabase
-      .channel('reviews_channel')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'reviews' }, () => {
-        fetchReviews();
-      })
+      .channel(`reviews_${bus.bus_number}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'reviews',
+          filter: `bus_number=eq.${bus.bus_number}`,
+        },
+        () => {
+          fetchReviews();
+        }
+      )
       .subscribe();
 
     return () => {
@@ -102,7 +121,7 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
       0.1,
       1000
     );
-    camera.position.set(0, 2, 5);
+    camera.position.set(0, 1, 4);
     camera.lookAt(0, 0, 0);
     cameraRef.current = camera;
 
@@ -122,42 +141,82 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
 
     // Load GLB model
     const loadModel = async () => {
-      if (!GLTFLoader) {
-        const loaderModule = await import('three/examples/jsm/loaders/GLTFLoader.js');
-        GLTFLoader = loaderModule.GLTFLoader;
-      }
-      
-      const loader = new GLTFLoader();
-      loader.load(
-        '/models/bus.glb',
-        (gltf) => {
-          const model = gltf.scene;
-          model.scale.set(1, 1, 1);
-          
-          // Center the model
-          const box = new THREE.Box3().setFromObject(model);
-          const center = box.getCenter(new THREE.Vector3());
-          model.position.sub(center);
-          
-          scene.add(model);
-          busModelRef.current = model;
-        },
-        (progress) => {
-          // Loading progress
-          if (progress.total > 0) {
-            console.log('Loading progress:', (progress.loaded / progress.total) * 100 + '%');
+      try {
+        // Dynamic import to avoid circular dependencies
+        const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js');
+        const loader = new GLTFLoader();
+        
+        loader.load(
+          '/models/bus.glb',
+          (gltf) => {
+            const model = gltf.scene.clone();
+            
+            // Calculate bounding box and center
+            const box = new THREE.Box3().setFromObject(model);
+            const center = box.getCenter(new THREE.Vector3());
+            const size = box.getSize(new THREE.Vector3());
+            
+            // Center the model at origin
+            model.position.set(-center.x, -center.y, -center.z);
+            
+            // Scale to fit if needed
+            const maxDimension = Math.max(size.x, size.y, size.z);
+            if (maxDimension > 3) {
+              const scale = 3 / maxDimension;
+              model.scale.set(scale, scale, scale);
+            } else if (maxDimension < 1) {
+              const scale = 1 / maxDimension;
+              model.scale.set(scale, scale, scale);
+            } else {
+              model.scale.set(1, 1, 1);
+            }
+            
+            // Remove old model if exists
+            if (busModelRef.current) {
+              scene.remove(busModelRef.current);
+            }
+            
+            scene.add(model);
+            busModelRef.current = model;
+            
+            // Reset camera to look at centered model
+            camera.position.set(0, 1.5, 5);
+            camera.lookAt(0, 0, 0);
+            camera.updateProjectionMatrix();
+          },
+          (progress) => {
+            // Loading progress
+            if (progress.total > 0) {
+              console.log('Loading progress:', ((progress.loaded / progress.total) * 100).toFixed(0) + '%');
+            }
+          },
+          (error) => {
+            console.error('Error loading model:', error);
+            // Fallback: create a simple bus shape
+            const geometry = new THREE.BoxGeometry(3, 2, 1.5);
+            const material = new THREE.MeshStandardMaterial({ color: 0x3b82f6 });
+            const bus = new THREE.Mesh(geometry, material);
+            bus.position.set(0, 0, 0);
+            scene.add(bus);
+            busModelRef.current = bus;
+            camera.position.set(0, 1.5, 5);
+            camera.lookAt(0, 0, 0);
+            camera.updateProjectionMatrix();
           }
-        },
-        (error) => {
-          console.error('Error loading model:', error);
-          // Fallback: create a simple bus shape
-          const geometry = new THREE.BoxGeometry(3, 2, 1.5);
-          const material = new THREE.MeshStandardMaterial({ color: 0x3b82f6 });
-          const bus = new THREE.Mesh(geometry, material);
-          scene.add(bus);
-          busModelRef.current = bus;
-        }
-      );
+        );
+      } catch (error) {
+        console.error('Error importing GLTFLoader:', error);
+        // Fallback: create a simple bus shape
+        const geometry = new THREE.BoxGeometry(3, 2, 1.5);
+        const material = new THREE.MeshStandardMaterial({ color: 0x3b82f6 });
+        const bus = new THREE.Mesh(geometry, material);
+        bus.position.set(0, 0, 0);
+        scene.add(bus);
+        busModelRef.current = bus;
+        camera.position.set(0, 1.5, 5);
+        camera.lookAt(0, 0, 0);
+        camera.updateProjectionMatrix();
+      }
     };
     
     loadModel();
@@ -205,9 +264,7 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
     // Animation loop
     const animate = () => {
       animationFrameRef.current = requestAnimationFrame(animate);
-      if (busModelRef.current && !isDragging) {
-        busModelRef.current.rotation.y += 0.005;
-      }
+      // Remove auto-rotation - only rotate on drag
       renderer.render(scene, camera);
     };
     animate();
@@ -314,20 +371,27 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
   const handleSaveProfile = async () => {
     if (!isDriver || !user) return;
 
-    if (busProfile) {
-      await supabase
-        .from('bus_profiles')
-        .update({ description })
-        .eq('id', busProfile.id);
-    } else {
-      await supabase.from('bus_profiles').insert({
-        bus_number: bus.bus_number,
-        driver_id: user.id,
-        description,
-      });
+    try {
+      if (busProfile) {
+        const { error } = await supabase
+          .from('bus_profiles')
+          .update({ description })
+          .eq('id', busProfile.id);
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.from('bus_profiles').insert({
+          bus_number: bus.bus_number,
+          driver_id: user.id,
+          description,
+        });
+        if (error) throw error;
+      }
+      setEditing(false);
+      await fetchBusProfile();
+    } catch (error) {
+      console.error('Error saving profile:', error);
+      alert('Ошибка при сохранении описания');
     }
-    setEditing(false);
-    fetchBusProfile();
   };
 
   const handleMediaUpload = async (file: File, type: 'photo' | 'video') => {
@@ -343,33 +407,48 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
 
     setUploadingMedia(true);
     try {
+      // Check if user is driver
+      if (!user || !isDriver) {
+        throw new Error('Только водители могут загружать медиа');
+      }
+
       const fileExt = file.name.split('.').pop();
       const fileName = `${bus.bus_number}-${Date.now()}.${fileExt}`;
-      const filePath = `bus-media/${fileName}`;
+      // Use bus number as folder for organization
+      const filePath = `${bus.bus_number}/${fileName}`;
 
       const { error: uploadError } = await supabase.storage
         .from('bus-media')
-        .upload(filePath, file);
+        .upload(filePath, file, { upsert: true });
 
-      if (uploadError) throw uploadError;
+      if (uploadError) {
+        console.error('Upload error:', uploadError);
+        throw new Error(`Ошибка загрузки: ${uploadError.message}`);
+      }
 
-      const { data } = supabase.storage.from('bus-media').getPublicUrl(filePath);
-      const mediaUrl = data.publicUrl;
+      const { data: urlData } = supabase.storage.from('bus-media').getPublicUrl(filePath);
+      const mediaUrl = urlData.publicUrl;
 
       const currentMaxOrder = media
         .filter((m) => m.media_type === type)
         .reduce((max, m) => (m.order_index > max ? m.order_index : max), -1);
 
-      await supabase.from('bus_media').insert({
+      const { error: insertError } = await supabase.from('bus_media').insert({
         bus_number: bus.bus_number,
         media_type: type,
         media_url: mediaUrl,
         order_index: currentMaxOrder + 1,
       });
 
-      fetchMedia();
-    } catch (error) {
+      if (insertError) {
+        console.error('Insert error:', insertError);
+        throw insertError;
+      }
+
+      await fetchMedia();
+    } catch (error: any) {
       console.error('Error uploading media:', error);
+      alert(`Ошибка при загрузке медиа: ${error.message || 'Неизвестная ошибка'}`);
     } finally {
       setUploadingMedia(false);
     }
@@ -378,16 +457,23 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
   const handleSubmitReview = async () => {
     if (!user || !newReviewRating) return;
 
-    await supabase.from('reviews').insert({
-      bus_number: bus.bus_number,
-      user_id: user.id,
-      rating: newReviewRating,
-      comment: newReviewComment.trim() || null,
-    });
+    try {
+      const { error } = await supabase.from('reviews').insert({
+        bus_number: bus.bus_number,
+        user_id: user.id,
+        rating: newReviewRating,
+        comment: newReviewComment.trim() || null,
+      });
 
-    setNewReviewRating(0);
-    setNewReviewComment('');
-    fetchReviews();
+      if (error) throw error;
+
+      setNewReviewRating(0);
+      setNewReviewComment('');
+      await fetchReviews();
+    } catch (error) {
+      console.error('Error submitting review:', error);
+      alert('Ошибка при добавлении отзыва');
+    }
   };
 
   const handleDeleteReview = async (reviewId: string) => {
