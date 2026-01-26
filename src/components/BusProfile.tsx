@@ -14,7 +14,7 @@ interface BusProfileProps {
 
 export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
   const { t } = useLanguage();
-  const { user, profile: currentProfile } = useAuth();
+  const { user } = useAuth();
   const [busProfile, setBusProfile] = useState<BusProfileType | null>(null);
   const [media, setMedia] = useState<BusMedia[]>([]);
   const [reviews, setReviews] = useState<Review[]>([]);
@@ -28,15 +28,13 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
   const [newReviewRating, setNewReviewRating] = useState(0);
   const [newReviewComment, setNewReviewComment] = useState('');
   const [uploadingMedia, setUploadingMedia] = useState(false);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
-  const busModelRef = useRef<THREE.Group | null>(null);
+  const controlsRef = useRef<any>(null);
+  const busModelRef = useRef<THREE.Object3D | null>(null);
   const animationFrameRef = useRef<number | null>(null);
-  const isDraggingRef = useRef(false);
-  const previousMousePositionRef = useRef({ x: 0, y: 0 });
 
   useEffect(() => {
     fetchBusProfile();
@@ -123,6 +121,24 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
     );
     camera.position.set(0, 1, 4);
     camera.lookAt(0, 0, 0);
+
+      // OrbitControls for rotate/zoom/pan
+      (async () => {
+        try {
+          const { OrbitControls } = await import('three/examples/jsm/controls/OrbitControls.js');
+          const controls = new OrbitControls(camera, renderer.domElement);
+          controls.enableDamping = true;
+          controls.dampingFactor = 0.08;
+          controls.enablePan = true;
+          controls.minDistance = 1.5;
+          controls.maxDistance = 25;
+          controls.target.set(0, 0.6, 0);
+          controls.update();
+          controlsRef.current = controls;
+        } catch (e) {
+          console.warn('OrbitControls not available', e);
+        }
+      })();
     cameraRef.current = camera;
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
@@ -155,34 +171,48 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
             const box = new THREE.Box3().setFromObject(model);
             const center = box.getCenter(new THREE.Vector3());
             const size = box.getSize(new THREE.Vector3());
-            
+
             // Center the model at origin
             model.position.set(-center.x, -center.y, -center.z);
-            
-            // Scale to fit if needed
+
+            // Scale to a predictable size range
             const maxDimension = Math.max(size.x, size.y, size.z);
-            if (maxDimension > 3) {
-              const scale = 3 / maxDimension;
-              model.scale.set(scale, scale, scale);
-            } else if (maxDimension < 1) {
-              const scale = 1 / maxDimension;
-              model.scale.set(scale, scale, scale);
-            } else {
-              model.scale.set(1, 1, 1);
-            }
-            
+            const target = 2.6; // ~fits nicely into the card
+            const scale = maxDimension > 0 ? target / maxDimension : 1;
+            model.scale.set(scale, scale, scale);
+
+            // Show "front" of model more often (many vehicle glb are facing -Z)
+            model.rotation.y = Math.PI;
+
             // Remove old model if exists
             if (busModelRef.current) {
               scene.remove(busModelRef.current);
             }
-            
+
             scene.add(model);
             busModelRef.current = model;
-            
-            // Reset camera to look at centered model
-            camera.position.set(0, 1.5, 5);
-            camera.lookAt(0, 0, 0);
+
+            // Fit camera to model after transforms
+            const fittedBox = new THREE.Box3().setFromObject(model);
+            const fittedSize = fittedBox.getSize(new THREE.Vector3());
+            const fittedCenter = fittedBox.getCenter(new THREE.Vector3());
+
+            const fov = (camera.fov * Math.PI) / 180;
+            const maxFitted = Math.max(fittedSize.x, fittedSize.y, fittedSize.z);
+
+            // Distance so that the whole model is visible
+            const distance = maxFitted / (2 * Math.tan(fov / 2)) + 1.2;
+
+            camera.position.set(distance * 0.65, distance * 0.35, distance);
+            camera.lookAt(fittedCenter.x, fittedCenter.y * 0.35, fittedCenter.z);
+            camera.near = 0.05;
+            camera.far = distance * 10;
             camera.updateProjectionMatrix();
+
+            if (controlsRef.current) {
+              controlsRef.current.target.copy(fittedCenter);
+              controlsRef.current.update();
+            }
           },
           (progress) => {
             // Loading progress
@@ -221,45 +251,6 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
     
     loadModel();
 
-    // Mouse controls for rotation
-    let isDragging = false;
-    let previousMousePosition = { x: 0, y: 0 };
-
-    const onMouseDown = (e: MouseEvent) => {
-      isDragging = true;
-      previousMousePosition = { x: e.clientX, y: e.clientY };
-    };
-
-    const onMouseMove = (e: MouseEvent) => {
-      if (!isDragging || !busModelRef.current) return;
-
-      const deltaX = e.clientX - previousMousePosition.x;
-      const deltaY = e.clientY - previousMousePosition.y;
-
-      busModelRef.current.rotation.y += deltaX * 0.01;
-      busModelRef.current.rotation.x += deltaY * 0.01;
-
-      previousMousePosition = { x: e.clientX, y: e.clientY };
-    };
-
-    const onMouseUp = () => {
-      isDragging = false;
-    };
-
-    // Wheel for zoom
-    const onWheel = (e: WheelEvent) => {
-      e.preventDefault();
-      const zoomSpeed = 0.1;
-      const zoom = e.deltaY > 0 ? 1 + zoomSpeed : 1 - zoomSpeed;
-      camera.position.multiplyScalar(zoom);
-      camera.position.clampLength(2, 10);
-    };
-
-    renderer.domElement.addEventListener('mousedown', onMouseDown);
-    renderer.domElement.addEventListener('mousemove', onMouseMove);
-    renderer.domElement.addEventListener('mouseup', onMouseUp);
-    renderer.domElement.addEventListener('mouseleave', onMouseUp);
-    renderer.domElement.addEventListener('wheel', onWheel);
 
     // Animation loop
     const animate = () => {
@@ -279,13 +270,7 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
     window.addEventListener('resize', handleResize);
 
     return () => {
-      window.removeEventListener('resize', handleResize);
-      renderer.domElement.removeEventListener('mousedown', onMouseDown);
-      renderer.domElement.removeEventListener('mousemove', onMouseMove);
-      renderer.domElement.removeEventListener('mouseup', onMouseUp);
-      renderer.domElement.removeEventListener('mouseleave', onMouseUp);
-      renderer.domElement.removeEventListener('wheel', onWheel);
-      
+      window.removeEventListener('resize', handleResize);      
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
       }
@@ -294,6 +279,11 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
         containerRef.current.removeChild(renderer.domElement);
       }
       
+      if (controlsRef.current) {
+        try { controlsRef.current.dispose(); } catch {}
+        controlsRef.current = null;
+      }
+
       renderer.dispose();
       scene.clear();
     };

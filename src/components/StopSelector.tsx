@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { X, MapPin, Plus } from 'lucide-react';
 import { Stop } from '../types';
 import { supabase } from '../lib/supabase';
@@ -24,11 +24,14 @@ export function StopSelector({ onSelect, onAddNew, excludeIds = [] }: StopSelect
   const [filteredStops, setFilteredStops] = useState<Stop[]>([]);
   const [showMiniMap, setShowMiniMap] = useState(false);
   const [selectedStopsForMap, setSelectedStopsForMap] = useState<Stop[]>([]);
-  const [newStopName, setNewStopName] = useState('');
-  const [mapLoaded, setMapLoaded] = useState(false);
-  const mapContainerRef = useRef<HTMLDivElement>(null);
+  const [newStopName, setNewStopName] = useState('');  const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<any>(null);
   const markersRef = useRef<Map<string, any>>(new Map());
+
+  // Parents often pass a freshly-created array literal (e.g. excludeIds={[...]}) on each render.
+  // Using the array directly in a useEffect dependency can cause an infinite loop.
+  const excludeKey = excludeIds.join('|');
+  const excludeSet = useMemo(() => new Set(excludeIds), [excludeKey]);
 
   useEffect(() => {
     const fetchStops = async () => {
@@ -62,7 +65,7 @@ export function StopSelector({ onSelect, onAddNew, excludeIds = [] }: StopSelect
       
       // Search in database stops first
       let filtered = stops
-        .filter((stop) => !excludeIds.includes(stop.id))
+        .filter((stop) => !excludeSet.has(stop.id))
         .filter((stop) => stop.name.toLowerCase().includes(lowerQuery))
         .slice(0, 10);
 
@@ -78,7 +81,7 @@ export function StopSelector({ onSelect, onAddNew, excludeIds = [] }: StopSelect
             longitude: s.longitude,
             created_at: new Date().toISOString(),
           })) as Stop[];
-          filtered = stopsData.filter((stop) => !excludeIds.includes(stop.id)).slice(0, 10);
+          filtered = stopsData.filter((stop) => !excludeSet.has(stop.id)).slice(0, 10);
         } catch (error) {
           console.error('Error searching 2GIS:', error);
         }
@@ -101,7 +104,7 @@ export function StopSelector({ onSelect, onAddNew, excludeIds = [] }: StopSelect
         const duplicateName = Array.from(nameGroups.entries()).find(([_, group]) => group.length > 1)?.[0];
         if (duplicateName) {
           const duplicateStops = filtered.filter(
-            (s) => s.name.toLowerCase() === duplicateName && !excludeIds.includes(s.id)
+            (s) => s.name.toLowerCase() === duplicateName && !excludeSet.has(s.id)
           );
           setSelectedStopsForMap(duplicateStops);
           setShowMiniMap(true);
@@ -115,7 +118,45 @@ export function StopSelector({ onSelect, onAddNew, excludeIds = [] }: StopSelect
     };
 
     searchStops();
-  }, [query, stops, excludeIds]);
+  }, [query, stops, excludeKey, excludeSet]);
+
+const handleSelectStop = useCallback(async (stop: Stop) => {
+  try {
+    // Stops coming from 2GIS are created as temp_* in UI. They MUST be saved in DB
+    // before we can reference them in route_stops (FK constraint).
+    if (stop.id.startsWith('temp_')) {
+      if (onAddNew) {
+        onAddNew(stop.name, stop.latitude, stop.longitude);
+        setQuery('');
+        setFilteredStops([]);
+        return;
+      }
+
+      const { data: created, error } = await supabase
+        .from('stops')
+        .insert({
+          name: stop.name,
+          latitude: stop.latitude,
+          longitude: stop.longitude,
+        })
+        .select('*')
+        .single();
+
+      if (error || !created) {
+        console.error('Error saving stop:', error);
+        alert('Ошибка при сохранении остановки');
+        return;
+      }
+
+      onSelect(created as Stop);
+    } else {
+      onSelect(stop);
+    }
+  } finally {
+    setQuery('');
+    setFilteredStops([]);
+  }
+}, [onAddNew, onSelect]);
 
   // Load map for mini-map selection
   useEffect(() => {
@@ -169,28 +210,13 @@ export function StopSelector({ onSelect, onAddNew, excludeIds = [] }: StopSelect
               }
               const { lat, lng } = e.latlng;
               
-              // First save to database
-              supabase.from('stops').insert({
-                name: newStopName.trim(),
-                latitude: lat,
-                longitude: lng,
-              }).then(({ data, error }) => {
-                if (error) {
-                  console.error('Error adding stop:', error);
-                  alert('Ошибка при добавлении остановки');
-                  return;
-                }
-                
-                if (data && data[0]) {
-                  const newStop = data[0] as Stop;
-                  onAddNew(newStopName.trim(), lat, lng);
-                  setShowMiniMap(false);
-                  setQuery('');
-                  setNewStopName('');
-                  map.off('click', clickHandler);
-                }
-              });
-            };
+              // Delegate saving to parent (RouteManager) to avoid double inserts / RLS issues
+              onAddNew(newStopName.trim(), lat, lng);
+              setShowMiniMap(false);
+              setQuery('');
+              setNewStopName('');
+              map.off('click', clickHandler);
+};
             
             map.on('click', clickHandler);
             
@@ -200,7 +226,7 @@ export function StopSelector({ onSelect, onAddNew, excludeIds = [] }: StopSelect
             };
           }
 
-          setMapLoaded(true);
+          
         });
       }
     };
@@ -217,32 +243,15 @@ export function StopSelector({ onSelect, onAddNew, excludeIds = [] }: StopSelect
       }
       markersRef.current.forEach((marker) => marker.remove());
       markersRef.current.clear();
-      setMapLoaded(false);
+      
     };
   }, [showMiniMap, selectedStopsForMap, onSelect, onAddNew, newStopName, handleSelectStop]);
 
-  const handleSelectStop = (stop: Stop) => {
-    // If it's a temporary stop from 2GIS, save it first
-    if (stop.id.startsWith('temp_')) {
-      supabase.from('stops').insert({
-        name: stop.name,
-        latitude: stop.latitude,
-        longitude: stop.longitude,
-      }).then(({ data, error }) => {
-        if (error) {
-          console.error('Error saving stop:', error);
-          alert('Ошибка при сохранении остановки');
-          return;
-        }
-        if (data && data[0]) {
-          onSelect(data[0] as Stop);
-        }
-      });
-    } else {
-      onSelect(stop);
-    }
-    setQuery('');
-    setFilteredStops([]);
+  const handleOpenMapPicker = () => {
+    // If there are filtered stops (including duplicates), show them on map for selection.
+    // If not, allow creating a new stop by clicking on map (requires onAddNew + newStopName).
+    setSelectedStopsForMap(filteredStops.length > 0 ? filteredStops : []);
+    setShowMiniMap(true);
   };
 
   const handleAddNewClick = () => {
@@ -250,32 +259,8 @@ export function StopSelector({ onSelect, onAddNew, excludeIds = [] }: StopSelect
       alert('Введите название остановки');
       return;
     }
-    setShowMiniMap(true);
     setSelectedStopsForMap([]);
-  };
-  
-  const handleSelect = (stop: Stop) => {
-    // If it's a temporary stop from 2GIS, save it first
-    if (stop.id.startsWith('temp_')) {
-      supabase.from('stops').insert({
-        name: stop.name,
-        latitude: stop.latitude,
-        longitude: stop.longitude,
-      }).then(({ data, error }) => {
-        if (error) {
-          console.error('Error saving stop:', error);
-          alert('Ошибка при сохранении остановки');
-          return;
-        }
-        if (data && data[0]) {
-          onSelect(data[0] as Stop);
-        }
-      });
-    } else {
-      onSelect(stop);
-    }
-    setQuery('');
-    setFilteredStops([]);
+    setShowMiniMap(true);
   };
 
   if (showMiniMap) {
@@ -299,7 +284,7 @@ export function StopSelector({ onSelect, onAddNew, excludeIds = [] }: StopSelect
                 }
                 markersRef.current.forEach((marker) => marker.remove());
                 markersRef.current.clear();
-                setMapLoaded(false);
+                
               }}
               className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
             >
@@ -340,26 +325,38 @@ export function StopSelector({ onSelect, onAddNew, excludeIds = [] }: StopSelect
 
   return (
     <div className="relative">
-      <div className="relative">
-        <input
-          type="text"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder={t('route.stopNamePlaceholder')}
-          className="w-full px-4 py-2.5 rounded-2xl border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-800 text-gray-900 dark:text-gray-50 focus:ring-2 focus:ring-gray-500 focus:border-transparent outline-none"
-        />
-        {query && (
-          <button
-            onClick={() => {
-              setQuery('');
-              setFilteredStops([]);
-            }}
-            className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        )}
-      </div>
+<div className="relative">
+  <input
+    type="text"
+    value={query}
+    onChange={(e) => setQuery(e.target.value)}
+    placeholder={t('route.stopNamePlaceholder')}
+    className="w-full pr-20 px-4 py-2.5 rounded-2xl border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-800 text-gray-900 dark:text-gray-50 focus:outline-none focus:ring-2 focus:ring-gray-500 transition-all"
+  />
+
+  <button
+    type="button"
+    onClick={handleOpenMapPicker}
+    className="absolute right-10 top-1/2 -translate-y-1/2 p-2 rounded-xl bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors"
+    title={t('route.pickOnMap') || 'Выбрать на карте'}
+  >
+    <MapPin className="w-4 h-4" />
+  </button>
+
+  {query && (
+    <button
+      type="button"
+      onClick={() => {
+        setQuery('');
+        setFilteredStops([]);
+      }}
+      className="absolute right-2 top-1/2 -translate-y-1/2 p-2 rounded-xl text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+      title={t('common.clear') || 'Очистить'}
+    >
+      <X className="w-5 h-5" />
+    </button>
+  )}
+</div>
 
       {filteredStops.length > 0 && (
         <div className="absolute z-50 w-full mt-2 bg-white dark:bg-gray-800 rounded-2xl shadow-lg border border-gray-200 dark:border-gray-700 max-h-60 overflow-y-auto">

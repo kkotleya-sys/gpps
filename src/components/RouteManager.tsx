@@ -17,9 +17,8 @@ export function RouteManager({ busNumber, driverId }: RouteManagerProps) {
   const [stops, setStops] = useState<Stop[]>([]);
   const [creatingRoute, setCreatingRoute] = useState(false);
   const [newRouteName, setNewRouteName] = useState('');
-  const [newRouteStops, setNewRouteStops] = useState<{ stop: Stop; time: string }[]>([]);
-  const [editingRouteId, setEditingRouteId] = useState<string | null>(null);
-  const [currentStopInput, setCurrentStopInput] = useState('');
+  const [newRouteStops, setNewRouteStops] = useState<{ stop: Stop; times: string[] }[]>([]);
+  const [editingRouteId, setEditingRouteId] = useState<string | null>(null); 
   const [currentTimeInput, setCurrentTimeInput] = useState('');
 
   useEffect(() => {
@@ -70,16 +69,45 @@ export function RouteManager({ busNumber, driverId }: RouteManagerProps) {
     if (!newRouteName.trim() || newRouteStops.length === 0) return;
 
     try {
-      const { data: route, error: routeError } = await supabase
-        .from('routes')
-        .insert({
-          bus_number: busNumber,
-          driver_id: driverId,
-          name: newRouteName.trim(),
-          is_active: false,
-        })
-        .select()
-        .single();
+      let route: any = null;
+
+      if (editingRouteId) {
+        const { data: updated, error: updErr } = await supabase
+          .from('routes')
+          .update({ name: newRouteName.trim() })
+          .eq('id', editingRouteId)
+          .select()
+          .single();
+
+        if (updErr || !updated) {
+          console.error('Error updating route:', updErr);
+          alert('Ошибка при обновлении маршрута');
+          return;
+        }
+
+        route = updated;
+
+        // Replace stops
+        await supabase.from('route_stops').delete().eq('route_id', editingRouteId);
+      } else {
+        const { data: created, error: routeError } = await supabase
+          .from('routes')
+          .insert({
+            bus_number: busNumber,
+            driver_id: driverId,
+            name: newRouteName.trim(),
+            is_active: false,
+          })
+          .select()
+          .single();
+
+        if (routeError || !created) {
+          console.error('Error creating route:', routeError);
+          alert('Ошибка при создании маршрута');
+          return;
+        }
+        route = created;
+      }
 
       if (routeError || !route) {
         console.error('Error creating route:', routeError);
@@ -93,7 +121,7 @@ export function RouteManager({ busNumber, driverId }: RouteManagerProps) {
           route_id: route.id,
           stop_id: newRouteStops[i].stop.id,
           order_index: i,
-          arrival_time: newRouteStops[i].time.trim() || null,
+          arrival_time: newRouteStops[i].times.filter(Boolean).join(', ') || null,
         });
         
         if (stopError) {
@@ -102,10 +130,10 @@ export function RouteManager({ busNumber, driverId }: RouteManagerProps) {
       }
 
       setCreatingRoute(false);
+      setEditingRouteId(null);
       setNewRouteName('');
       setNewRouteStops([]);
-      setCurrentStopInput('');
-      setCurrentTimeInput('');
+            setCurrentTimeInput('');
       await fetchRoutes();
       await fetchRouteStops();
     } catch (error: any) {
@@ -116,11 +144,19 @@ export function RouteManager({ busNumber, driverId }: RouteManagerProps) {
 
   const handleToggleRoute = async (routeId: string, currentActive: boolean) => {
     try {
+      // If turning ON a route, make sure all other routes for this bus are OFF
+      if (!currentActive) {
+        await supabase
+          .from('routes')
+          .update({ is_active: false })
+          .eq('bus_number', busNumber);
+      }
+
       const { error } = await supabase
         .from('routes')
         .update({ is_active: !currentActive })
         .eq('id', routeId);
-      
+
       if (error) {
         console.error('Error toggling route:', error);
         alert('Ошибка при переключении маршрута');
@@ -133,14 +169,31 @@ export function RouteManager({ busNumber, driverId }: RouteManagerProps) {
     }
   };
 
+
+const handleStartEditRoute = (route: Route) => {
+  const list = getRouteStops(route.id).map((rs) => ({
+    stop: rs.stop as Stop,
+    times: rs.arrival_time ? rs.arrival_time.split(',').map((x) => x.trim()).filter(Boolean) : [],
+  }));
+  setEditingRouteId(route.id);
+  setCreatingRoute(true);
+  setNewRouteName(route.name);
+  setNewRouteStops(list);
+  setCurrentTimeInput('');
+};
+
+const handleDeleteRoute = async (routeId: string) => {
+  if (!confirm('Удалить маршрут?')) return;
+  await supabase.from('route_stops').delete().eq('route_id', routeId);
+  await supabase.from('routes').delete().eq('id', routeId);
+};
   const handleAddStopToNewRoute = (stop: Stop) => {
     if (!stop || !stop.id) {
       console.error('Invalid stop:', stop);
       return;
     }
-    setNewRouteStops([...newRouteStops, { stop, time: currentTimeInput.trim() }]);
-    setCurrentStopInput('');
-    setCurrentTimeInput('');
+    setNewRouteStops([...newRouteStops, { stop, times: currentTimeInput.trim() ? [currentTimeInput.trim()] : [] }]);
+        setCurrentTimeInput('');
   };
 
   const handleRemoveStopFromNewRoute = (index: number) => {
@@ -196,13 +249,13 @@ export function RouteManager({ busNumber, driverId }: RouteManagerProps) {
         <div className="bg-white dark:bg-gray-800 rounded-3xl p-4 shadow-sm border border-gray-200 dark:border-gray-700 space-y-4">
           <div>
             <label className="block text-sm font-semibold text-gray-900 dark:text-gray-50 mb-2">
-              {t('route.name')}
+              {editingRouteId ? 'Название маршрута (редактирование)' : t('route.name')}
             </label>
             <input
               type="text"
               value={newRouteName}
               onChange={(e) => setNewRouteName(e.target.value)}
-              placeholder={t('route.name')}
+              placeholder={editingRouteId ? 'Название маршрута (редактирование)' : t('route.name')}
               className="w-full px-4 py-2.5 rounded-2xl border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-50"
             />
           </div>
@@ -239,12 +292,27 @@ export function RouteManager({ busNumber, driverId }: RouteManagerProps) {
                       {index + 1}.
                     </span>
                     <span className="text-sm text-gray-900 dark:text-gray-50">{rs.stop.name}</span>
-                    {rs.time && (
+                    {rs.times.length > 0 && (
                       <span className="text-xs text-gray-500 dark:text-gray-400 flex items-center space-x-1">
                         <Clock className="w-3 h-3" />
-                        <span>{rs.time}</span>
+                        <span>{rs.times.join(', ')}</span>
                       </span>
                     )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const v = prompt('Добавить время (например 08:30)');
+                        if (!v) return;
+                        setNewRouteStops((prev) =>
+                          prev.map((p, idx) =>
+                            idx === index ? { ...p, times: [...p.times, v.trim()].filter(Boolean) } : p
+                          )
+                        );
+                      }}
+                      className="ml-2 text-xs px-2 py-1 rounded-xl bg-gray-200 dark:bg-gray-600 text-gray-900 dark:text-gray-50 hover:bg-gray-300 dark:hover:bg-gray-500 transition-colors"
+                    >
+                      +время
+                    </button>
                   </div>
                   <button
                     onClick={() => handleRemoveStopFromNewRoute(index)}
@@ -268,6 +336,7 @@ export function RouteManager({ busNumber, driverId }: RouteManagerProps) {
             <button
               onClick={() => {
                 setCreatingRoute(false);
+      setEditingRouteId(null);
                 setNewRouteName('');
                 setNewRouteStops([]);
               }}
@@ -313,6 +382,22 @@ export function RouteManager({ busNumber, driverId }: RouteManagerProps) {
                   {route.is_active ? t('route.active') : t('route.inactive')}
                 </span>
               </div>
+              <div className="flex items-center space-x-2">
+                <button
+                  type="button"
+                  onClick={() => handleStartEditRoute(route)}
+                  className="px-3 py-1.5 rounded-xl bg-gray-200 dark:bg-gray-700 text-xs font-semibold text-gray-900 dark:text-gray-50 hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors"
+                >
+                  Редактировать
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleDeleteRoute(route.id)}
+                  className="px-3 py-1.5 rounded-xl bg-red-100 dark:bg-red-900 text-xs font-semibold text-red-700 dark:text-red-200 hover:bg-red-200 dark:hover:bg-red-800 transition-colors"
+                >
+                  Удалить
+                </button>
+              </div>
             </div>
 
             {routeStopsList.length > 0 ? (
@@ -332,7 +417,7 @@ export function RouteManager({ busNumber, driverId }: RouteManagerProps) {
                       {rs.arrival_time && (
                         <span className="text-xs text-gray-500 dark:text-gray-400 flex items-center space-x-1">
                           <Clock className="w-3 h-3" />
-                          <span>{rs.arrival_time}</span>
+                          <span>{rs.arrival_time.split(',').map((x) => x.trim()).filter(Boolean).join(', ')}</span>
                         </span>
                       )}
                     </div>

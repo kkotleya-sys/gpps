@@ -4,6 +4,7 @@ import { BusStopSchedule, BusWithDriver, Stop } from '../types';
 import { supabase } from '../lib/supabase';
 import { useLanguage } from '../contexts/LanguageContext';
 import { RouteManager } from './RouteManager';
+import { StopSelector } from './StopSelector';
 import { useAuth } from '../contexts/AuthContext';
 
 interface ScheduleViewProps {
@@ -41,14 +42,9 @@ export function ScheduleView({
   const { t } = useLanguage();
   const { user } = useAuth();
   const [stops, setStops] = useState<Stop[]>([]);
-  const [schedules, setSchedules] = useState<BusStopSchedule[]>([]);
-  const [newStopName, setNewStopName] = useState('');
-  const [newStopTime, setNewStopTime] = useState('');
-  const [searchStop, setSearchStop] = useState('');
+  const [schedules, setSchedules] = useState<BusStopSchedule[]>([]);  const [searchStop, setSearchStop] = useState('');
   const [fromStop, setFromStop] = useState('');
   const [toStop, setToStop] = useState('');
-  const [savingStop, setSavingStop] = useState(false);
-
   useEffect(() => {
     const fetchData = async () => {
       const { data: stopsData } = await supabase.from('stops').select('*');
@@ -93,79 +89,12 @@ export function ScheduleView({
         stop: Stop;
       }[],
     [schedules, stops]
-  );
-
-  const driverSchedules = useMemo(
-    () =>
-      isDriver && driverBusNumber
-        ? schedulesWithStops
-            .filter((s) => s.schedule.bus_number === driverBusNumber)
-            .sort(
-              (a, b) =>
-                a.schedule.order_index - b.schedule.order_index
-            )
-        : [],
-    [isDriver, driverBusNumber, schedulesWithStops]
-  );
+  ); 
 
   const allStops = useMemo(() => {
     const names = new Set(stops.map((s) => s.name.trim()));
     return Array.from(names).filter(Boolean).sort();
-  }, [stops]);
-
-  const addDriverStop = async () => {
-    if (!isDriver || !driverBusNumber) return;
-    if (!newStopName.trim() || !newStopTime.trim()) return;
-    setSavingStop(true);
-
-    try {
-      // Найти или создать остановку по имени (без координат, если её ещё нет)
-      const existing = stops.find(
-        (s) => s.name.trim().toLowerCase() === newStopName.trim().toLowerCase()
-      );
-
-      let stopId = existing?.id;
-
-      if (!stopId) {
-        const { data: newStop, error: stopError } = await supabase
-          .from('stops')
-          .insert({
-            name: newStopName.trim(),
-            latitude: userLocation?.lat || 0,
-            longitude: userLocation?.lng || 0,
-          })
-          .select('*')
-          .single();
-
-        if (stopError || !newStop) return;
-        stopId = (newStop as Stop).id;
-      }
-
-      const currentMaxOrder =
-        schedules
-          .filter((s) => s.bus_number === driverBusNumber)
-          .reduce(
-            (max, s) => (s.order_index > max ? s.order_index : max),
-            0
-          ) || 0;
-
-      await supabase.from('bus_stop_schedules').insert({
-        bus_number: driverBusNumber,
-        stop_id: stopId,
-        order_index: currentMaxOrder + 1,
-        arrival_time: newStopTime.trim(),
-      });
-
-      setNewStopName('');
-      setNewStopTime('');
-    } finally {
-      setSavingStop(false);
-    }
-  };
-
-  const removeDriverStop = (id: string) => {
-    supabase.from('bus_stop_schedules').delete().eq('id', id);
-  };
+  }, [stops]); 
 
   const busesWithEta = useMemo(() => {
     if (!userLocation) return [];
@@ -405,22 +334,14 @@ export function ScheduleView({
         </section>
 
         <section className="bg-white dark:bg-slate-800 rounded-3xl p-4 shadow-sm space-y-3">
-          <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-50 mb-1 flex items-center space-x-2">
-            <Search className="w-4 h-4 text-gray-700 dark:text-gray-300" />
-            <span>{t('schedule.findByStop')}</span>
-          </h3>
-          <input
-            className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-900 text-sm outline-none focus:ring-2 focus:ring-gray-500 text-gray-900 dark:text-gray-50 transition-all"
-            placeholder="Введите название остановки"
-            value={searchStop}
-            onChange={(e) => setSearchStop(e.target.value)}
-            list="stops-list"
-          />
-          <datalist id="stops-list">
-            {allStops.map((name) => (
-              <option key={name} value={name} />
-            ))}
-          </datalist>
+          <div className="space-y-2">
+            <StopSelector onSelect={(stop) => setSearchStop(stop.name)} />
+            {searchStop && (
+              <p className="text-[10px] text-gray-500 dark:text-gray-400">
+                Выбрано: <span className="font-semibold">{searchStop}</span>
+              </p>
+            )}
+          </div>
           {searchStopResult && (
             <div className="rounded-2xl bg-slate-50 dark:bg-slate-900 px-3 py-2 text-xs">
               {searchStopResult.buses.length === 0 ? (
@@ -453,25 +374,19 @@ export function ScheduleView({
               <label className="block text-[10px] text-gray-500 dark:text-gray-400 mb-1">
                 {t('schedule.from')}
               </label>
-              <input
-                className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-900 text-xs outline-none focus:ring-2 focus:ring-gray-500 text-gray-900 dark:text-gray-50 transition-all"
-                placeholder="Ваша остановка"
-                value={fromStop}
-                onChange={(e) => setFromStop(e.target.value)}
-                list="stops-list"
-              />
+              <StopSelector onSelect={(stop) => setFromStop(stop.name)} />
+              {fromStop && (
+                <p className="text-[10px] text-gray-500 dark:text-gray-400 mt-1">Выбрано: <span className="font-semibold">fromStop</span></p>
+              )}
             </div>
             <div>
               <label className="block text-[10px] text-gray-500 dark:text-gray-400 mb-1">
                 {t('schedule.to')}
               </label>
-              <input
-                className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-900 text-xs outline-none focus:ring-2 focus:ring-gray-500 text-gray-900 dark:text-gray-50 transition-all"
-                placeholder="Нужная остановка"
-                value={toStop}
-                onChange={(e) => setToStop(e.target.value)}
-                list="stops-list"
-              />
+              <StopSelector onSelect={(stop) => setToStop(stop.name)} />
+              {toStop && (
+                <p className="text-[10px] text-gray-500 dark:text-gray-400 mt-1">Выбрано: <span className="font-semibold">toStop</span></p>
+              )}
             </div>
           </div>
 
@@ -514,5 +429,4 @@ export function ScheduleView({
     </div>
   );
 }
-
 
