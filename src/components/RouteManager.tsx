@@ -1,3 +1,4 @@
+// Updated RouteManager.tsx
 import { useState, useEffect, useMemo } from 'react';
 import { Plus, X, Clock, Power } from 'lucide-react';
 import { Route, RouteStop, Stop } from '../types';
@@ -46,13 +47,13 @@ export function RouteManager({ busNumber, driverId }: RouteManagerProps) {
       supabase.removeChannel(routesChannel);
       supabase.removeChannel(routeStopsChannel);
     };
-  }, [busNumber]);
+  }, [driverId]);
 
   const fetchRoutes = async () => {
     const { data } = await supabase
       .from('routes')
       .select('*')
-      .eq('bus_number', busNumber)
+      .eq('driver_id', driverId)
       .order('created_at', { ascending: false });
     if (data) setRoutes(data as Route[]);
   };
@@ -115,7 +116,7 @@ export function RouteManager({ busNumber, driverId }: RouteManagerProps) {
           await supabase
             .from('routes')
             .update({ is_active: false })
-            .eq('bus_number', busNumber)
+            .eq('driver_id', driverId)
             .neq('id', route.id);
         }
       }
@@ -152,12 +153,12 @@ export function RouteManager({ busNumber, driverId }: RouteManagerProps) {
 
   const handleToggleRoute = async (routeId: string, currentActive: boolean) => {
     try {
-      // If turning ON a route, make sure all other routes for this bus are OFF
+      // If turning ON a route, make sure all other routes for this driver are OFF
       if (!currentActive) {
         await supabase
           .from('routes')
           .update({ is_active: false })
-          .eq('bus_number', busNumber);
+          .eq('driver_id', driverId);
       }
 
       const { error } = await supabase
@@ -494,5 +495,3 @@ const handleDeleteRoute = async (routeId: string) => {
     </div>
   );
 }
-
-

@@ -33,6 +33,45 @@ function haversineKm(
   return R * c;
 }
 
+const GEMINI_KEY = (import.meta as any).env?.VITE_GEMINI_API_KEY as string | undefined;
+
+const callGemini = async (prompt: string) => {
+  if (!GEMINI_KEY) throw new Error('Missing Gemini key');
+  const endpoints = [
+    'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent',
+    'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-lite:generateContent',
+    'https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent',
+    'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.0-flash:generateContent',
+  ];
+
+  let lastError: Error | null = null;
+  for (const url of endpoints) {
+    try {
+      const res = await fetch(`${url}?key=${GEMINI_KEY}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.2 },
+        }),
+      });
+      if (!res.ok) {
+        lastError = new Error(`Gemini API error ${res.status}`);
+        continue;
+      }
+      const json = await res.json();
+      const text = json?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+      if (text) return text;
+      lastError = new Error('Empty Gemini response');
+    } catch (e: any) {
+      lastError = e;
+    }
+  }
+  throw lastError || new Error('Gemini API error');
+};
+
 export function ScheduleView({
   buses,
   userLocation,
@@ -45,6 +84,10 @@ export function ScheduleView({
   const [schedules, setSchedules] = useState<BusStopSchedule[]>([]);
   const [nearestStopQuery, setNearestStopQuery] = useState('');
   const [nearestStopId, setNearestStopId] = useState<string | null>(null);
+  const [startStop, setStartStop] = useState<Stop | null>(null);
+  const [endStop, setEndStop] = useState<Stop | null>(null);
+  const [routeResult, setRouteResult] = useState<string | null>(null);
+  const [calculatingRoute, setCalculatingRoute] = useState(false);
 
   const handleCreateStop = async (name: string, lat: number, lng: number) => {
     try {
@@ -62,10 +105,87 @@ export function ScheduleView({
       return data as Stop;
     } catch (error) {
       console.error('Error creating stop:', error);
-        alert('Ошибка при добавлении остановки');
+      alert('Ошибка при добавлении остановки');
       return null;
     }
   };
+
+  const handleCalculateRoute = async () => {
+    if (!startStop || !endStop) {
+      alert('Выберите начальную и конечную остановки');
+      return;
+    }
+
+    setCalculatingRoute(true);
+    setRouteResult(null);
+
+    try {
+      // Собираем данные об активных маршрутах
+      const { data: activeRoutes } = await supabase
+        .from('routes')
+        .select('*')
+        .eq('is_active', true);
+
+      if (!activeRoutes || activeRoutes.length === 0) {
+        setRouteResult('Нет активных маршрутов');
+        return;
+      }
+
+      let routesText = 'Активные автобусные маршруты:\n\n';
+
+      for (const route of activeRoutes) {
+        const { data: routeStopsData } = await supabase
+          .from('route_stops')
+          .select('order_index, stop_id')
+          .eq('route_id', route.id)
+          .order('order_index', { ascending: true });
+
+        if (routeStopsData && routeStopsData.length > 0) {
+          const stopNames: string[] = [];
+          for (const rs of routeStopsData) {
+            const { data: stop } = await supabase
+              .from('stops')
+              .select('name')
+              .eq('id', rs.stop_id)
+              .single();
+
+            if (stop?.name) stopNames.push(stop.name);
+          }
+          routesText += `Автобус №${route.bus_number} (${route.name || 'без названия'}):\n`;
+          routesText += stopNames.join(' → ') + '\n\n';
+        }
+      }
+
+      if (routesText === 'Активные автобусные маршруты:\n\n') {
+        setRouteResult('Нет данных о маршрутах');
+        return;
+      }
+
+      const prompt = `Вот список активных автобусных маршрутов:
+
+${routesText}
+
+Задача: найди маршрут от остановки "${startStop.name}" до остановки "${endStop.name}" с минимальным количеством пересадок.
+
+Правила ответа:
+- Если можно доехать одним автобусом — напиши "Без пересадок" и укажи номер автобуса и где выйти.
+- Если нужны пересадки — подробно опиши: на какой автобус сесть, на какой остановке выйти, на какой следующий сесть и т.д.
+- Пиши кратко, понятно, на русском языке.
+- Если маршрут невозможен — напиши "Маршрут не найден".
+
+Ответ должен быть в дружелюбном стиле.`;
+
+      const responseText = await callGemini(prompt);
+      setRouteResult(responseText);
+
+    } catch (err: any) {
+      console.error('Ошибка при расчёте маршрута:', err);
+      setRouteResult('Ошибка при расчёте маршрута: ' + (err.message || 'неизвестная ошибка'));
+    } finally {
+      setCalculatingRoute(false);
+    }
+  };
+
   useEffect(() => {
     const fetchData = async () => {
       const { data: stopsData } = await supabase.from('stops').select('*');
@@ -287,10 +407,58 @@ export function ScheduleView({
           </div>
         </section>
 
+        {/* New section for route calculation */}
+        <section className="bg-white dark:bg-slate-800 rounded-3xl p-4 shadow-sm">
+          <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-50 mb-2 flex items-center space-x-2">
+            <Navigation className="w-4 h-4 text-gray-700 dark:text-gray-300" />
+            <span>Найти маршрут между остановками</span>
+          </h3>
+          <div className="space-y-2">
+            <label className="block text-[10px] text-gray-500 dark:text-gray-400">
+              Начальная остановка
+            </label>
+            <StopSelector
+              onSelect={setStartStop}
+              onAddNew={handleCreateStop}
+              allowMapPickWithoutName
+            />
+            {startStop && (
+              <p className="text-[10px] text-gray-500 dark:text-gray-400">
+                Выбрано: <span className="font-semibold">{startStop.name}</span>
+              </p>
+            )}
+          </div>
+          <div className="space-y-2 mt-2">
+            <label className="block text-[10px] text-gray-500 dark:text-gray-400">
+              Конечная остановка
+            </label>
+            <StopSelector
+              onSelect={setEndStop}
+              onAddNew={handleCreateStop}
+              allowMapPickWithoutName
+            />
+            {endStop && (
+              <p className="text-[10px] text-gray-500 dark:text-gray-400">
+                Выбрано: <span className="font-semibold">{endStop.name}</span>
+              </p>
+            )}
+          </div>
+          <button
+            onClick={handleCalculateRoute}
+            disabled={calculatingRoute || !startStop || !endStop}
+            className="w-full mt-4 px-4 py-2.5 bg-gray-900 dark:bg-gray-700 text-white rounded-xl font-semibold hover:bg-gray-800 dark:hover:bg-gray-600 disabled:opacity-50 transition-colors"
+          >
+            {calculatingRoute ? 'Расчет...' : 'Рассчитать маршрут'}
+          </button>
+          {routeResult && (
+            <div className="mt-3 rounded-2xl bg-slate-50 dark:bg-slate-900 px-3 py-2 text-xs whitespace-pre-wrap">
+              {routeResult}
+            </div>
+          )}
+        </section>
+
 
       </div>
     </div>
   );
 }
-
-

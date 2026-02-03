@@ -1,4 +1,5 @@
-﻿import { useState, useEffect, useRef } from 'react';
+﻿// Updated Settings.tsx
+import { useState, useEffect, useRef } from 'react';
 import { Shield, Moon, Sun, Upload, X as XIcon, Globe } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useLanguage, Language } from '../contexts/LanguageContext';
@@ -33,7 +34,6 @@ export function Settings({ onClose, onOpenAdmin }: SettingsProps) {
   const pendingSaveRef = useRef(false);
   const lastSavedRef = useRef<{ first_name: string; last_name: string; bus_number: string | null } | null>(null);
   const latestPayloadRef = useRef<{ first_name: string; last_name: string; bus_number: string | null } | null>(null);
-  const debounceRef = useRef<number | null>(null);
   const hydratingRef = useRef(false);
   const dirtyRef = useRef(false);
   const CROP_SIZE = 240;
@@ -93,6 +93,24 @@ export function Settings({ onClose, onOpenAdmin }: SettingsProps) {
     setMessage('');
     try {
       await updateProfile(payload);
+      // If bus_number changed and user is DRIVER, update all routes for this driver
+      if (
+        profile?.role === UserRole.DRIVER &&
+        lastSavedRef.current?.bus_number !== payload.bus_number &&
+        payload.bus_number !== null &&
+        user
+      ) {
+        const { error: updateRoutesError } = await supabase
+          .from('routes')
+          .update({ bus_number: payload.bus_number })
+          .eq('driver_id', user.id);
+
+        if (updateRoutesError) {
+          console.error('Error updating routes bus_number:', updateRoutesError);
+          setMessage('Ошибка при обновлении номеров автобусов в маршрутах');
+          setTimeout(() => setMessage(''), 3000);
+        }
+      }
       lastSavedRef.current = payload;
       dirtyRef.current = false;
     } catch (error) {
@@ -110,12 +128,7 @@ export function Settings({ onClose, onOpenAdmin }: SettingsProps) {
 
   const queueSave = (payload: { first_name: string; last_name: string; bus_number: string | null }) => {
     latestPayloadRef.current = payload;
-    if (debounceRef.current) {
-      clearTimeout(debounceRef.current);
-    }
-    debounceRef.current = window.setTimeout(() => {
-      saveLatestProfile();
-    }, 500);
+    saveLatestProfile();
   };
 
   const toggleTheme = () => {
