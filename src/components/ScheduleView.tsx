@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Clock4, Navigation, Route, Search } from 'lucide-react';
+import { Clock4, Navigation, Search } from 'lucide-react';
 import { BusStopSchedule, BusWithDriver, Stop } from '../types';
 import { supabase } from '../lib/supabase';
 import { useLanguage } from '../contexts/LanguageContext';
@@ -42,9 +42,30 @@ export function ScheduleView({
   const { t } = useLanguage();
   const { user } = useAuth();
   const [stops, setStops] = useState<Stop[]>([]);
-  const [schedules, setSchedules] = useState<BusStopSchedule[]>([]);  const [searchStop, setSearchStop] = useState('');
-  const [fromStop, setFromStop] = useState('');
-  const [toStop, setToStop] = useState('');
+  const [schedules, setSchedules] = useState<BusStopSchedule[]>([]);
+  const [nearestStopQuery, setNearestStopQuery] = useState('');
+  const [nearestStopId, setNearestStopId] = useState<string | null>(null);
+
+  const handleCreateStop = async (name: string, lat: number, lng: number) => {
+    try {
+      const finalName = name.trim() || `Custom stop ${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+      const { data, error } = await supabase
+        .from('stops')
+        .insert({ name: finalName, latitude: lat, longitude: lng })
+        .select()
+        .single();
+      if (error || !data) {
+        console.error('Error creating stop:', error);
+        alert('Ошибка при добавлении остановки');
+        return null;
+      }
+      return data as Stop;
+    } catch (error) {
+      console.error('Error creating stop:', error);
+        alert('Ошибка при добавлении остановки');
+      return null;
+    }
+  };
   useEffect(() => {
     const fetchData = async () => {
       const { data: stopsData } = await supabase.from('stops').select('*');
@@ -91,11 +112,6 @@ export function ScheduleView({
     [schedules, stops]
   ); 
 
-  const allStops = useMemo(() => {
-    const names = new Set(stops.map((s) => s.name.trim()));
-    return Array.from(names).filter(Boolean).sort();
-  }, [stops]); 
-
   const busesWithEta = useMemo(() => {
     if (!userLocation) return [];
     return buses.map((bus) => {
@@ -130,145 +146,39 @@ export function ScheduleView({
     return map;
   }, [schedulesWithStops, buses]);
 
-  const stopToBuses = useMemo(() => {
-    const map = new Map<string, Set<string>>();
-    schedulesWithStops.forEach(({ schedule, stop }) => {
-      if (!map.has(stop.name)) map.set(stop.name, new Set<string>());
-      map.get(stop.name)!.add(schedule.bus_number);
-    });
-    return map;
-  }, [schedulesWithStops]);
+  const nearestStopResult = useMemo(() => {
+    const name = nearestStopQuery.trim();
+    if (!name || !nearestStopId) return null;
+    const stopIds = [nearestStopId];
+    if (stopIds.length === 0) return { stopName: name, buses: [] as { bus: string; eta: number | null }[] };
 
-  const searchStopResult = useMemo(() => {
-    const name = searchStop.trim();
-    if (!name) return null;
-    const busesSet = stopToBuses.get(name);
-    if (!busesSet) return { stopName: name, buses: [] as string[] };
-    return { stopName: name, buses: Array.from(busesSet).sort() };
-  }, [searchStop, stopToBuses]);
-
-  const transferSuggestion = useMemo(() => {
-    const from = fromStop.trim();
-    const to = toStop.trim();
-    if (!from || !to || from === to) return null;
-
-    // Граф: узел = остановка, ребро = автобус, который идёт между двумя остановками
-    const stopsByName = new Map<string, Stop[]>(
-      stops.map((s) => [s.name, []])
-    );
-    stops.forEach((s) => {
-      const arr = stopsByName.get(s.name) || [];
-      arr.push(s);
-      stopsByName.set(s.name, arr);
-    });
-
-    // Сопоставляем stopName -> список stop_id, buses проходящих через них
-    const busesByStopId = new Map<string, Set<string>>();
-    schedules.forEach((s) => {
-      if (!busesByStopId.has(s.stop_id)) {
-        busesByStopId.set(s.stop_id, new Set<string>());
+    const busMap = new Map<string, number | null>();
+    schedulesWithStops.forEach(({ schedule }) => {
+      if (!stopIds.includes(schedule.stop_id)) return;
+      const key = `${schedule.bus_number}_${schedule.stop_id}`;
+      const eta = etaByStopAndBus.get(key) ?? null;
+      if (!busMap.has(schedule.bus_number)) {
+        busMap.set(schedule.bus_number, eta);
+      } else {
+        const current = busMap.get(schedule.bus_number);
+        if (current === null || (eta !== null && eta < current)) {
+          busMap.set(schedule.bus_number, eta);
+        }
       }
-      busesByStopId.get(s.stop_id)!.add(s.bus_number);
     });
 
-    // Находим все stop_id для from/to по имени
-    const fromCandidates = stops
-      .filter((s) => s.name.trim().toLowerCase() === from.toLowerCase())
-      .map((s) => s.id);
-    const toCandidates = stops
-      .filter((s) => s.name.trim().toLowerCase() === to.toLowerCase())
-      .map((s) => s.id);
-
-    if (fromCandidates.length === 0 || toCandidates.length === 0) {
-      return null;
-    }
-
-    // BFS по графу (узел = stop_id, состояние хранит также текущий автобус для подсчёта пересадок)
-    type State = {
-      stopId: string;
-      bus: string | null;
-    };
-
-    const queue: State[] = fromCandidates.map((id) => ({
-      stopId: id,
-      bus: null,
-    }));
-    const visited = new Set<string>();
-    const parent = new Map<string, { prev: string | null; bus: string | null }>();
-
-    fromCandidates.forEach((id) =>
-      parent.set(id, { prev: null, bus: null })
-    );
-
-    let foundTarget: string | null = null;
-
-    const getKey = (stopId: string, bus: string | null) =>
-      `${stopId}|${bus || 'none'}`;
-
-    const visitedStates = new Set<string>();
-
-    while (queue.length > 0) {
-      const current = queue.shift()!;
-      const stateKey = getKey(current.stopId, current.bus);
-      if (visitedStates.has(stateKey)) continue;
-      visitedStates.add(stateKey);
-
-      if (toCandidates.includes(current.stopId)) {
-        foundTarget = current.stopId;
-        break;
-      }
-
-      const busesHere = busesByStopId.get(current.stopId);
-      if (!busesHere) continue;
-
-      busesHere.forEach((busNum) => {
-        // Возможность пересесть на автобус на этой же остановке
-        const sameBusStops = schedules
-          .filter((s) => s.bus_number === busNum)
-          .map((s) => s.stop_id);
-
-        sameBusStops.forEach((nextStopId) => {
-          const nextKey = getKey(nextStopId, busNum);
-          if (visitedStates.has(nextKey)) return;
-          if (!parent.has(nextStopId)) {
-            parent.set(nextStopId, {
-              prev: current.stopId,
-              bus: busNum,
-            });
-          }
-          queue.push({ stopId: nextStopId, bus: busNum });
-        });
+    const buses = Array.from(busMap.entries())
+      .map(([bus, eta]) => ({ bus, eta }))
+      .sort((a, b) => {
+        if (a.eta === null && b.eta === null) return a.bus.localeCompare(b.bus);
+        if (a.eta === null) return 1;
+        if (b.eta === null) return -1;
+        return a.eta - b.eta;
       });
-    }
 
-    if (!foundTarget) return null;
+    return { stopName: name, buses };
+  }, [nearestStopQuery, nearestStopId, schedulesWithStops, etaByStopAndBus]);
 
-    // Восстановление пути
-    const pathStops: { stopId: string; bus: string | null }[] = [];
-    let cur: string | null = foundTarget;
-    while (cur) {
-      const p = parent.get(cur);
-      pathStops.unshift({ stopId: cur, bus: p?.bus || null });
-      cur = p?.prev || null;
-    }
-
-    // Формируем список автобусов и количество пересадок
-    const busesOnPath: string[] = [];
-    let lastBus: string | null = null;
-    pathStops.forEach((p) => {
-      if (p.bus && p.bus !== lastBus) {
-        busesOnPath.push(p.bus);
-        lastBus = p.bus;
-      }
-    });
-
-    if (busesOnPath.length === 0) return null;
-
-    return {
-      transfers: Math.max(0, busesOnPath.length - 1),
-      buses: busesOnPath,
-    };
-  }, [fromStop, toStop, schedules, stops]);
 
   return (
     <div className="h-full flex flex-col bg-gray-50 dark:bg-gray-900 transition-colors duration-300">
@@ -331,102 +241,56 @@ export function ScheduleView({
                 ))}
             </div>
           )}
-        </section>
 
-        <section className="bg-white dark:bg-slate-800 rounded-3xl p-4 shadow-sm space-y-3">
-          <div className="space-y-2">
-            <StopSelector onSelect={(stop) => setSearchStop(stop.name)} />
-            {searchStop && (
+          <div className="mt-3 space-y-2">
+            <label className="block text-[10px] text-gray-500 dark:text-gray-400">
+              Автобусы к остановке
+            </label>
+            <StopSelector
+              onSelect={(stop) => {
+                setNearestStopQuery(stop.name);
+                setNearestStopId(stop.id);
+              }}
+              onAddNew={handleCreateStop}
+              allowMapPickWithoutName
+            />
+            {nearestStopQuery && (
               <p className="text-[10px] text-gray-500 dark:text-gray-400">
-                Выбрано: <span className="font-semibold">{searchStop}</span>
+                Выбрано: <span className="font-semibold">{nearestStopQuery}</span>
               </p>
             )}
+            {nearestStopResult && (
+              <div className="rounded-2xl bg-slate-50 dark:bg-slate-900 px-3 py-2 text-xs">
+                {nearestStopResult.buses.length === 0 ? (
+                  <div className="rounded-2xl bg-gray-100 dark:bg-gray-800 px-4 py-6 text-center">
+                    <Search className="w-6 h-6 text-gray-400 dark:text-gray-500 mx-auto mb-2" />
+                    <p className="text-gray-500 dark:text-gray-400">
+                      Для остановки «{nearestStopResult.stopName}» пока нет маршрутов.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    {nearestStopResult.buses.map((b) => (
+                      <div key={b.bus} className="flex items-center justify-between">
+                        <span className="font-semibold text-slate-900 dark:text-slate-50">
+                          Автобус №{b.bus}
+                        </span>
+                        <span className="text-gray-500 dark:text-gray-400">
+                          {b.eta === null ? '—' : `≈ ${b.eta} мин`}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
-          {searchStopResult && (
-            <div className="rounded-2xl bg-slate-50 dark:bg-slate-900 px-3 py-2 text-xs">
-              {searchStopResult.buses.length === 0 ? (
-                <div className="rounded-2xl bg-gray-100 dark:bg-gray-800 px-4 py-6 text-center">
-                  <Search className="w-8 h-8 text-gray-400 dark:text-gray-500 mx-auto mb-2" />
-                  <p className="text-gray-500 dark:text-gray-400">
-                    Для остановки «{searchStopResult.stopName}» пока нет сохранённых маршрутов.
-                  </p>
-                </div>
-              ) : (
-                <p className="text-slate-500 dark:text-slate-200">
-                  До остановки «{searchStopResult.stopName}» подойдут автобусы:{' '}
-                  <span className="font-semibold text-slate-900 dark:text-slate-50">
-                    {searchStopResult.buses.join(', ')}
-                  </span>
-                  . Пересадки не учитываются.
-                </p>
-              )}
-            </div>
-          )}
         </section>
 
-        <section className="bg-white dark:bg-slate-800 rounded-3xl p-4 shadow-sm space-y-3">
-          <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-50 mb-1 flex items-center space-x-2">
-            <Route className="w-4 h-4 text-gray-700 dark:text-gray-300" />
-            <span>{t('schedule.routeWithTransfers')}</span>
-          </h3>
-          <div className="grid grid-cols-2 gap-2">
-            <div>
-              <label className="block text-[10px] text-gray-500 dark:text-gray-400 mb-1">
-                {t('schedule.from')}
-              </label>
-              <StopSelector onSelect={(stop) => setFromStop(stop.name)} />
-              {fromStop && (
-                <p className="text-[10px] text-gray-500 dark:text-gray-400 mt-1">Выбрано: <span className="font-semibold">fromStop</span></p>
-              )}
-            </div>
-            <div>
-              <label className="block text-[10px] text-gray-500 dark:text-gray-400 mb-1">
-                {t('schedule.to')}
-              </label>
-              <StopSelector onSelect={(stop) => setToStop(stop.name)} />
-              {toStop && (
-                <p className="text-[10px] text-gray-500 dark:text-gray-400 mt-1">Выбрано: <span className="font-semibold">toStop</span></p>
-              )}
-            </div>
-          </div>
 
-          {transferSuggestion && (
-            <div className="rounded-2xl bg-slate-50 dark:bg-slate-900 px-3 py-2 text-xs">
-              {transferSuggestion.transfers === 0 ? (
-                <p className="text-slate-500 dark:text-slate-200">
-                  Можно доехать без пересадок на автобусе(ах){' '}
-                  <span className="font-semibold text-slate-900 dark:text-slate-50">
-                    {transferSuggestion.buses.join(', ')}
-                  </span>
-                  .
-                </p>
-              ) : (
-                <p className="text-slate-500 dark:text-slate-200">
-                  Нужна {transferSuggestion.transfers} пересадка. Сначала сядьте на{' '}
-                  <span className="font-semibold">
-                    {transferSuggestion.buses[0]}
-                  </span>
-                  , затем пересядьте на{' '}
-                  <span className="font-semibold">
-                    {transferSuggestion.buses[1]}
-                  </span>
-                  .
-                </p>
-              )}
-            </div>
-          )}
-
-          {!transferSuggestion && fromStop && toStop && fromStop !== toStop && (
-            <div className="rounded-2xl bg-gray-100 dark:bg-gray-800 px-4 py-6 text-center">
-              <Route className="w-8 h-8 text-gray-400 dark:text-gray-500 mx-auto mb-2" />
-              <p className="text-[11px] text-gray-500 dark:text-gray-400">
-                По сохранённым расписаниям пока не найден простой маршрут между этими остановками.
-              </p>
-            </div>
-          )}
-        </section>
       </div>
     </div>
   );
 }
+
 

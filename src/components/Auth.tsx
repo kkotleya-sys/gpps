@@ -1,4 +1,4 @@
-import { useState } from 'react';
+﻿import { useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { LogIn, UserPlus, X } from 'lucide-react';
 
@@ -30,7 +30,7 @@ export function Auth({ onClose, onGuestMode }: AuthProps) {
       }
       onClose?.();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'An error occurred');
+      setError(err instanceof Error ? err.message : 'Произошла ошибка');
     } finally {
       setLoading(false);
     }
@@ -78,7 +78,7 @@ export function Auth({ onClose, onGuestMode }: AuthProps) {
                     onChange={(e) => setFirstName(e.target.value)}
                     required
                     className="w-full px-4 py-2.5 border border-gray-300 dark:border-gray-600 rounded-2xl bg-gray-50 dark:bg-gray-800 text-gray-900 dark:text-gray-50 focus:ring-2 focus:ring-gray-500 focus:border-transparent outline-none transition-all"
-                    placeholder="Иван"
+                    placeholder="Имя"
                   />
                 </div>
                 <div>
@@ -91,7 +91,7 @@ export function Auth({ onClose, onGuestMode }: AuthProps) {
                     onChange={(e) => setLastName(e.target.value)}
                     required
                     className="w-full px-4 py-2.5 border border-gray-300 dark:border-gray-600 rounded-2xl bg-gray-50 dark:bg-gray-800 text-gray-900 dark:text-gray-50 focus:ring-2 focus:ring-gray-500 focus:border-transparent outline-none transition-all"
-                    placeholder="Иванов"
+                    placeholder="Фамилия"
                   />
                 </div>
               </div>

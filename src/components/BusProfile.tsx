@@ -1,10 +1,12 @@
-import { useState, useEffect, useRef } from 'react';
-import { X, Star, Camera, Video, Edit2, Save } from 'lucide-react';
+﻿import { useState, useEffect, useRef } from 'react';
+import { X, Star, Camera, Video, Edit2, Save, Bell } from 'lucide-react';
 import * as THREE from 'three';
 import { BusWithDriver, BusProfile as BusProfileType, BusMedia, Review, Route, RouteStop, Stop, Profile } from '../types';
 import { supabase } from '../lib/supabase';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useAuth } from '../contexts/AuthContext';
+import { StopSelector } from './StopSelector';
+import { ensureNotificationPermission, loadNotificationPrefs, saveNotificationPrefs } from '../lib/notifications';
 
 interface BusProfileProps {
   bus: BusWithDriver;
@@ -28,6 +30,14 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
   const [newReviewRating, setNewReviewRating] = useState(0);
   const [newReviewComment, setNewReviewComment] = useState('');
   const [uploadingMedia, setUploadingMedia] = useState(false);
+  const [translateLoading, setTranslateLoading] = useState<string | null>(null);
+  const [translations, setTranslations] = useState<Record<string, string>>({});
+  const [aiSummary, setAiSummary] = useState<string | null>(null);
+  const [aiSummaryLoading, setAiSummaryLoading] = useState(false);
+  const [notifEnabled, setNotifEnabled] = useState(false);
+  const [notifBusId, setNotifBusId] = useState(false);
+  const [notifBusNumber, setNotifBusNumber] = useState(false);
+  const [notifStops, setNotifStops] = useState<Stop[]>([]);
   const containerRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -35,6 +45,46 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
   const controlsRef = useRef<any>(null);
   const busModelRef = useRef<THREE.Object3D | null>(null);
   const animationFrameRef = useRef<number | null>(null);
+  const deletingMediaRef = useRef<Set<string>>(new Set());
+  const GEMINI_KEY = (import.meta as any).env?.VITE_GEMINI_API_KEY as string | undefined;
+
+  const callGemini = async (prompt: string) => {
+    if (!GEMINI_KEY) throw new Error('Missing Gemini key');
+    const endpoints = [
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent',
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent',
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent',
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent',
+    ];
+
+    let lastError: Error | null = null;
+    for (const url of endpoints) {
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': GEMINI_KEY,
+          },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: { temperature: 0.2 },
+          }),
+        });
+        if (!res.ok) {
+          lastError = new Error(`Gemini API error ${res.status}`);
+          continue;
+        }
+        const json = await res.json();
+        const text = json?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+        if (text) return text;
+        lastError = new Error('Empty Gemini response');
+      } catch (e: any) {
+        lastError = e;
+      }
+    }
+    throw lastError || new Error('Gemini API error');
+  };
 
   useEffect(() => {
     fetchBusProfile();
@@ -43,6 +93,10 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
     fetchRoutes();
     fetchRouteStops();
     fetchStops();
+    const prefs = loadNotificationPrefs();
+    setNotifEnabled(prefs.enabled);
+    setNotifBusId(prefs.busIds.includes(bus.id));
+    setNotifBusNumber(prefs.busNumbers.includes(bus.bus_number));
 
     const profileChannel = supabase
       .channel(`bus_profile_${bus.bus_number}`)
@@ -106,9 +160,13 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
   }, [busProfile, bus.driver_id]);
 
   useEffect(() => {
+    const prefs = loadNotificationPrefs();
+    setNotifStops(stops.filter((s) => prefs.stopIds.includes(s.id)));
+  }, [stops]);
+
+  useEffect(() => {
     if (!containerRef.current) return;
 
-    // Initialize Three.js scene
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0xffffff);
     sceneRef.current = scene;
@@ -121,24 +179,6 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
     );
     camera.position.set(0, 1, 4);
     camera.lookAt(0, 0, 0);
-
-      // OrbitControls for rotate/zoom/pan
-      (async () => {
-        try {
-          const { OrbitControls } = await import('three/examples/jsm/controls/OrbitControls.js');
-          const controls = new OrbitControls(camera, renderer.domElement);
-          controls.enableDamping = true;
-          controls.dampingFactor = 0.08;
-          controls.enablePan = true;
-          controls.minDistance = 1.5;
-          controls.maxDistance = 25;
-          controls.target.set(0, 0.6, 0);
-          controls.update();
-          controlsRef.current = controls;
-        } catch (e) {
-          console.warn('OrbitControls not available', e);
-        }
-      })();
     cameraRef.current = camera;
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
@@ -147,7 +187,24 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
     containerRef.current.appendChild(renderer.domElement);
     rendererRef.current = renderer;
 
-    // Add lights
+    (async () => {
+      try {
+        const { OrbitControls } = await import('three/examples/jsm/controls/OrbitControls.js');
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.08;
+        controls.enablePan = false;
+        controls.enableZoom = true;
+        controls.minDistance = 1;
+        controls.maxDistance = 12;
+        controls.target.set(0, 0.6, 0);
+        controls.update();
+        controlsRef.current = controls;
+      } catch (e) {
+        console.warn('OrbitControls not available', e);
+      }
+    })();
+
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
     scene.add(ambientLight);
 
@@ -155,36 +212,30 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
     directionalLight.position.set(5, 10, 5);
     scene.add(directionalLight);
 
-    // Load GLB model
     const loadModel = async () => {
       try {
-        // Dynamic import to avoid circular dependencies
         const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js');
         const loader = new GLTFLoader();
-        
+
+        const modelUrl = `${import.meta.env.BASE_URL}models/bus.glb`;
         loader.load(
-          '/models/bus.glb',
+          modelUrl,
           (gltf) => {
             const model = gltf.scene.clone();
-            
-            // Calculate bounding box and center
+
             const box = new THREE.Box3().setFromObject(model);
             const center = box.getCenter(new THREE.Vector3());
             const size = box.getSize(new THREE.Vector3());
 
-            // Center the model at origin
             model.position.set(-center.x, -center.y, -center.z);
 
-            // Scale to a predictable size range
             const maxDimension = Math.max(size.x, size.y, size.z);
-            const target = 2.6; // ~fits nicely into the card
+            const target = 6.2;
             const scale = maxDimension > 0 ? target / maxDimension : 1;
             model.scale.set(scale, scale, scale);
 
-            // Show "front" of model more often (many vehicle glb are facing -Z)
             model.rotation.y = Math.PI;
 
-            // Remove old model if exists
             if (busModelRef.current) {
               scene.remove(busModelRef.current);
             }
@@ -192,7 +243,6 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
             scene.add(model);
             busModelRef.current = model;
 
-            // Fit camera to model after transforms
             const fittedBox = new THREE.Box3().setFromObject(model);
             const fittedSize = fittedBox.getSize(new THREE.Vector3());
             const fittedCenter = fittedBox.getCenter(new THREE.Vector3());
@@ -200,35 +250,34 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
             const fov = (camera.fov * Math.PI) / 180;
             const maxFitted = Math.max(fittedSize.x, fittedSize.y, fittedSize.z);
 
-            // Distance so that the whole model is visible
-            const distance = maxFitted / (2 * Math.tan(fov / 2)) + 1.2;
+            const distance = maxFitted / (2 * Math.tan(fov / 2)) + 0.1;
 
-            camera.position.set(distance * 0.65, distance * 0.35, distance);
-            camera.lookAt(fittedCenter.x, fittedCenter.y * 0.35, fittedCenter.z);
+            camera.position.set(distance * 0.3, distance * 0.15, distance * 0.45);
+            camera.lookAt(fittedCenter.x, fittedCenter.y * 0.25, fittedCenter.z);
             camera.near = 0.05;
             camera.far = distance * 10;
             camera.updateProjectionMatrix();
 
             if (controlsRef.current) {
               controlsRef.current.target.copy(fittedCenter);
+              controlsRef.current.minDistance = Math.max(0.5, distance * 0.25);
+              controlsRef.current.maxDistance = Math.max(6, distance * 2);
               controlsRef.current.update();
             }
           },
           (progress) => {
-            // Loading progress
             if (progress.total > 0) {
               console.log('Loading progress:', ((progress.loaded / progress.total) * 100).toFixed(0) + '%');
             }
           },
           (error) => {
             console.error('Error loading model:', error);
-            // Fallback: create a simple bus shape
             const geometry = new THREE.BoxGeometry(3, 2, 1.5);
             const material = new THREE.MeshStandardMaterial({ color: 0x3b82f6 });
-            const bus = new THREE.Mesh(geometry, material);
-            bus.position.set(0, 0, 0);
-            scene.add(bus);
-            busModelRef.current = bus;
+            const busMesh = new THREE.Mesh(geometry, material);
+            busMesh.position.set(0, 0, 0);
+            scene.add(busMesh);
+            busModelRef.current = busMesh;
             camera.position.set(0, 1.5, 5);
             camera.lookAt(0, 0, 0);
             camera.updateProjectionMatrix();
@@ -236,31 +285,26 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
         );
       } catch (error) {
         console.error('Error importing GLTFLoader:', error);
-        // Fallback: create a simple bus shape
         const geometry = new THREE.BoxGeometry(3, 2, 1.5);
         const material = new THREE.MeshStandardMaterial({ color: 0x3b82f6 });
-        const bus = new THREE.Mesh(geometry, material);
-        bus.position.set(0, 0, 0);
-        scene.add(bus);
-        busModelRef.current = bus;
+        const busMesh = new THREE.Mesh(geometry, material);
+        busMesh.position.set(0, 0, 0);
+        scene.add(busMesh);
+        busModelRef.current = busMesh;
         camera.position.set(0, 1.5, 5);
         camera.lookAt(0, 0, 0);
         camera.updateProjectionMatrix();
       }
     };
-    
+
     loadModel();
 
-
-    // Animation loop
     const animate = () => {
       animationFrameRef.current = requestAnimationFrame(animate);
-      // Remove auto-rotation - only rotate on drag
       renderer.render(scene, camera);
     };
     animate();
 
-    // Handle resize
     const handleResize = () => {
       if (!containerRef.current || !camera || !renderer) return;
       camera.aspect = containerRef.current.clientWidth / containerRef.current.clientHeight;
@@ -270,17 +314,19 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
     window.addEventListener('resize', handleResize);
 
     return () => {
-      window.removeEventListener('resize', handleResize);      
+      window.removeEventListener('resize', handleResize);
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
       }
-      
+
       if (containerRef.current && renderer.domElement) {
         containerRef.current.removeChild(renderer.domElement);
       }
-      
+
       if (controlsRef.current) {
-        try { controlsRef.current.dispose(); } catch {}
+        try {
+          controlsRef.current.dispose();
+        } catch {}
         controlsRef.current = null;
       }
 
@@ -288,7 +334,6 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
       scene.clear();
     };
   }, []);
-
   const fetchBusProfile = async () => {
     const { data } = await supabase
       .from('bus_profiles')
@@ -397,14 +442,12 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
 
     setUploadingMedia(true);
     try {
-      // Check if user is driver
       if (!user || !isDriver) {
         throw new Error('Только водители могут загружать медиа');
       }
 
       const fileExt = file.name.split('.').pop();
       const fileName = `${bus.bus_number}-${Date.now()}.${fileExt}`;
-      // Use bus number as folder for organization
       const filePath = `${bus.bus_number}/${fileName}`;
 
       const { error: uploadError } = await supabase.storage
@@ -444,6 +487,29 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
     }
   };
 
+  const getMediaPathFromUrl = (url: string) => {
+    const marker = '/bus-media/';
+    const idx = url.indexOf(marker);
+    if (idx === -1) return null;
+    return url.substring(idx + marker.length);
+  };
+
+  const handleDeleteMedia = async (item: BusMedia) => {
+    if (!isDriver || deletingMediaRef.current.has(item.id)) return;
+    if (!confirm('Удалить медиа?')) return;
+    deletingMediaRef.current.add(item.id);
+    try {
+      const path = getMediaPathFromUrl(item.media_url);
+      if (path) {
+        await supabase.storage.from('bus-media').remove([path]);
+      }
+      await supabase.from('bus_media').delete().eq('id', item.id);
+      await fetchMedia();
+    } finally {
+      deletingMediaRef.current.delete(item.id);
+    }
+  };
+
   const handleSubmitReview = async () => {
     if (!user || !newReviewRating) return;
 
@@ -472,6 +538,73 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
     fetchReviews();
   };
 
+  const handleTranslateReview = async (review: Review, lang: 'ru' | 'tj' | 'eng') => {
+    if (!review.comment) return;
+    const key = `${review.id}_${lang}`;
+    if (translations[key]) return;
+    if (!GEMINI_KEY) {
+      alert('Добавьте VITE_GEMINI_API_KEY в .env');
+      return;
+    }
+    setTranslateLoading(key);
+    try {
+      const prompt = `Переведи на язык ${lang.toUpperCase()} следующий текст. Только перевод без пояснений:\n${review.comment}`;
+      const text = await callGemini(prompt);
+      if (text) setTranslations((prev) => ({ ...prev, [key]: text }));
+    } catch (e) {
+      console.error('Translate error', e);
+      alert('Ошибка перевода');
+    } finally {
+      setTranslateLoading(null);
+    }
+  };
+
+  const handleAiSummary = async () => {
+    if (aiSummaryLoading) return;
+    if (!GEMINI_KEY) {
+      alert('Добавьте VITE_GEMINI_API_KEY в .env');
+      return;
+    }
+    const list = reviews.map((r) => `${r.rating}/5: ${r.comment || ''}`).join('\n');
+    if (!list) return;
+    setAiSummaryLoading(true);
+    try {
+      const prompt = `Сделай короткий анализ отзывов об автобусе: общая оценка, 2-3 тезиса, что нравится и что не нравится.\nОтзывы:\n${list}`;
+      const text = await callGemini(prompt);
+      if (text) setAiSummary(text);
+    } catch (e) {
+      console.error('AI summary error', e);
+      alert('Ошибка AI анализа');
+    } finally {
+      setAiSummaryLoading(false);
+    }
+  };
+
+  const saveNotifPrefs = async (next: { enabled?: boolean; busId?: boolean; busNumber?: boolean; stopIds?: string[] }) => {
+    const current = loadNotificationPrefs();
+    const enabled = next.enabled ?? current.enabled;
+    const busIds = new Set(current.busIds);
+    const busNumbers = new Set(current.busNumbers);
+    const stopIds = new Set(next.stopIds ?? current.stopIds);
+
+    if (next.busId !== undefined) {
+      if (next.busId) busIds.add(bus.id);
+      else busIds.delete(bus.id);
+    }
+    if (next.busNumber !== undefined) {
+      if (next.busNumber) busNumbers.add(bus.bus_number);
+      else busNumbers.delete(bus.bus_number);
+    }
+
+    const prefs = {
+      enabled,
+      busIds: Array.from(busIds),
+      busNumbers: Array.from(busNumbers),
+      stopIds: Array.from(stopIds),
+    };
+    saveNotificationPrefs(prefs);
+  };
+
   const filteredReviews = reviews.filter((review) => {
     if (reviewFilter === 'all') return true;
     if (reviewFilter === 'positive') return review.rating >= 4;
@@ -489,7 +622,10 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
     : [];
 
   const userReview = reviews.find((r) => r.user_id === user?.id);
-
+  const avgRating =
+    reviews.length > 0
+      ? (reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length).toFixed(1)
+      : '—';
   return (
     <div className="fixed inset-0 bg-black/50 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
       <div className="bg-white dark:bg-gray-900 w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-t-3xl sm:rounded-3xl shadow-2xl animate-slide-up">
@@ -506,14 +642,12 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
         </div>
 
         <div className="p-4 space-y-4">
-          {/* 3D Model */}
-          <div 
-            ref={containerRef} 
-            className="bg-white dark:bg-gray-800 rounded-2xl h-64 overflow-hidden relative"
+          <div
+            ref={containerRef}
+            className="bg-white dark:bg-gray-800 rounded-2xl h-80 overflow-hidden relative"
             style={{ touchAction: 'none' }}
           />
 
-          {/* Bus Info */}
           <div className="flex items-center justify-between">
             <div>
               <p className="text-lg font-semibold text-gray-900 dark:text-gray-50">
@@ -525,7 +659,6 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
             </div>
           </div>
 
-          {/* Driver Profile */}
           {driverProfile && (
             <div className="bg-gray-50 dark:bg-gray-800 rounded-2xl p-4">
               <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-50 mb-2">
@@ -552,7 +685,6 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
             </div>
           )}
 
-          {/* Description */}
           <div className="bg-gray-50 dark:bg-gray-800 rounded-2xl p-4">
             <div className="flex items-center justify-between mb-2">
               <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-50">
@@ -581,7 +713,6 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
             )}
           </div>
 
-          {/* Media */}
           {media.length > 0 && (
             <div>
               <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-50 mb-2">
@@ -595,13 +726,20 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
                     ) : (
                       <video src={item.media_url} className="w-full h-32 object-cover" controls />
                     )}
+                    {isDriver && (
+                      <button
+                        onClick={() => handleDeleteMedia(item)}
+                        className="absolute top-2 right-2 px-2 py-1 rounded-full bg-black/70 text-white text-[10px] hover:bg-black/90"
+                      >
+                        Удалить
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>
             </div>
           )}
 
-          {/* Add Media (Driver only) */}
           {isDriver && (
             <div className="flex space-x-2">
               <label className="flex-1 px-4 py-2 bg-gray-900 dark:bg-gray-700 text-white rounded-xl font-semibold flex items-center justify-center space-x-2 cursor-pointer hover:bg-gray-800 dark:hover:bg-gray-600">
@@ -635,7 +773,6 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
             </div>
           )}
 
-          {/* Active Route */}
           {activeRoute && activeRouteStops.length > 0 && (
             <div className="bg-gray-50 dark:bg-gray-800 rounded-2xl p-4">
               <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-50 mb-2">
@@ -666,13 +803,128 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
             </div>
           )}
 
-          {/* Reviews */}
+          <div className="bg-gray-50 dark:bg-gray-800 rounded-2xl p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-semibold text-gray-900 dark:text-gray-50">Уведомления</p>
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  Включите, чтобы получать уведомления о прибытии.
+                </p>
+              </div>
+              <button
+                onClick={async () => {
+                  const allowed = await ensureNotificationPermission();
+                  if (!allowed) {
+                    alert('Разрешите уведомления в браузере');
+                    return;
+                  }
+                  const next = !notifEnabled;
+                  setNotifEnabled(next);
+                  await saveNotifPrefs({ enabled: next });
+                }}
+                className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-2 ${
+                  notifEnabled
+                    ? 'bg-green-600 text-white'
+                    : 'bg-gray-200 dark:bg-gray-700 text-gray-900 dark:text-gray-50'
+                }`}
+              >
+                <Bell className="w-4 h-4" />
+                {notifEnabled ? 'Вкл' : 'Выкл'}
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={async () => {
+                  const next = !notifBusId;
+                  setNotifBusId(next);
+                  await saveNotifPrefs({ busId: next });
+                }}
+                className={`px-3 py-1.5 rounded-xl text-xs font-semibold ${
+                  notifBusId ? 'bg-gray-900 text-white' : 'bg-gray-200 dark:bg-gray-700'
+                }`}
+              >
+                Этот автобус
+              </button>
+              <button
+                onClick={async () => {
+                  const next = !notifBusNumber;
+                  setNotifBusNumber(next);
+                  await saveNotifPrefs({ busNumber: next });
+                }}
+                className={`px-3 py-1.5 rounded-xl text-xs font-semibold ${
+                  notifBusNumber ? 'bg-gray-900 text-white' : 'bg-gray-200 dark:bg-gray-700'
+                }`}
+              >
+                Все автобусы №{bus.bus_number}
+              </button>
+            </div>
+            <div className="space-y-2">
+              <p className="text-xs text-gray-500 dark:text-gray-400">Уведомлять по остановке</p>
+              <StopSelector
+                onSelect={(stop) => {
+                  const next = [...notifStops.filter((s) => s.id !== stop.id), stop];
+                  setNotifStops(next);
+                  saveNotifPrefs({ stopIds: next.map((s) => s.id) });
+                }}
+                onAddNew={async (name, lat, lng) => {
+                  const { data, error } = await supabase
+                    .from('stops')
+                    .insert({ name, latitude: lat, longitude: lng })
+                    .select()
+                    .single();
+                  if (error || !data) return null;
+                  return data as Stop;
+                }}
+                allowMapPickWithoutName
+              />
+              {notifStops.length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                  {notifStops.map((s) => (
+                    <button
+                      key={s.id}
+                      onClick={() => {
+                        const next = notifStops.filter((x) => x.id !== s.id);
+                        setNotifStops(next);
+                        saveNotifPrefs({ stopIds: next.map((x) => x.id) });
+                      }}
+                      className="px-2 py-1 rounded-xl bg-gray-200 dark:bg-gray-700 text-xs"
+                    >
+                      {s.name} ✕
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
           <div>
             <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-50 mb-2">
               {t('busProfile.reviews')}
             </h3>
 
-            {/* Review Filters */}
+            <div className="rounded-2xl bg-gray-50 dark:bg-gray-800 p-4 mb-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">Рейтинг по отзывам</p>
+                  <p className="text-2xl font-bold text-gray-900 dark:text-gray-50">
+                    {avgRating}
+                  </p>
+                </div>
+                <button
+                  onClick={handleAiSummary}
+                  className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-gray-900 text-white hover:bg-gray-800"
+                  disabled={aiSummaryLoading || reviews.length === 0}
+                >
+                  {aiSummaryLoading ? 'AI анализ...' : 'AI анализ'}
+                </button>
+              </div>
+              {aiSummary && (
+                <p className="mt-2 text-xs text-gray-600 dark:text-gray-300 whitespace-pre-line">
+                  {aiSummary}
+                </p>
+              )}
+            </div>
+
             <div className="flex space-x-2 mb-4 overflow-x-auto">
               <button
                 onClick={() => setReviewFilter('all')}
@@ -720,7 +972,6 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
               ))}
             </div>
 
-            {/* Write Review */}
             {user && !userReview && (
               <div className="bg-gray-50 dark:bg-gray-800 rounded-2xl p-4 mb-4">
                 <h4 className="text-sm font-semibold text-gray-900 dark:text-gray-50 mb-2">
@@ -758,7 +1009,6 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
               </div>
             )}
 
-            {/* Reviews List */}
             <div className="space-y-3">
               {filteredReviews.map((review) => (
                 <div
@@ -802,6 +1052,31 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
                       {review.comment}
                     </p>
                   )}
+                  {review.comment && (
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {(['ru', 'tj', 'eng'] as const).map((lang) => {
+                        const k = `${review.id}_${lang}`;
+                        return (
+                          <button
+                            key={k}
+                            onClick={() => handleTranslateReview(review, lang)}
+                            className="px-2 py-1 rounded-xl bg-gray-200 dark:bg-gray-700 text-xs"
+                            disabled={translateLoading === k}
+                          >
+                            {translateLoading === k ? '...' : `Перевести ${lang.toUpperCase()}`}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {review.comment && (['ru', 'tj', 'eng'] as const).map((lang) => {
+                    const k = `${review.id}_${lang}`;
+                    return translations[k] ? (
+                      <p key={k} className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                        <span className="font-semibold">{lang.toUpperCase()}:</span> {translations[k]}
+                      </p>
+                    ) : null;
+                  })}
                 </div>
               ))}
             </div>

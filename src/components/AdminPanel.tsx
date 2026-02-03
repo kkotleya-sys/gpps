@@ -1,7 +1,9 @@
-import { useState, useEffect } from 'react';
-import { X, Users, Search, Edit2, Trash2 } from 'lucide-react';
+﻿import { useState, useEffect, useRef } from 'react';
+import { X, Users, Search, Edit2, Trash2, DownloadCloud } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { Profile, UserRole } from '../types';
+import { fetchAllDushanbeStopsFromMapbox, hasMapboxToken } from '../lib/stopsParser';
+import { loadMapbox } from '../lib/mapboxLoader';
 
 interface AdminPanelProps {
   onClose: () => void;
@@ -13,10 +15,81 @@ export function AdminPanel({ onClose }: AdminPanelProps) {
   const [loading, setLoading] = useState(true);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editRole, setEditRole] = useState<UserRole>(UserRole.USER);
+  const [importingStops, setImportingStops] = useState(false);
+  const [importProgress, setImportProgress] = useState(0);
+  const [importedStops, setImportedStops] = useState(0);
+  const [skippedStops, setSkippedStops] = useState(0);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [showAddStopModal, setShowAddStopModal] = useState(false);
+  const [newStopName, setNewStopName] = useState('');
+  const [newStopLat, setNewStopLat] = useState<number | null>(null);
+  const [newStopLng, setNewStopLng] = useState<number | null>(null);
+  const mapContainerRef = useRef<HTMLDivElement>(null);
+  const mapInstanceRef = useRef<any>(null);
+  const markerRef = useRef<any>(null);
 
   useEffect(() => {
     fetchProfiles();
   }, []);
+
+  useEffect(() => {
+    if (!showAddStopModal || !mapContainerRef.current) return;
+    let cancelled = false;
+
+    loadMapbox()
+      .then((mapboxgl) => {
+        if (cancelled || mapInstanceRef.current || !mapContainerRef.current) return;
+        const map = new mapboxgl.Map({
+          container: mapContainerRef.current,
+          style: 'mapbox://styles/mapbox/streets-v12',
+          center: [68.7738, 38.5598],
+          zoom: 13,
+        });
+        mapInstanceRef.current = map;
+
+        const clickHandler = (e: any) => {
+          const { lng, lat } = e.lngLat;
+          setNewStopLat(lat);
+          setNewStopLng(lng);
+
+          if (markerRef.current) {
+            markerRef.current.setLngLat([lng, lat]);
+          } else {
+            markerRef.current = new mapboxgl.Marker()
+              .setLngLat([lng, lat])
+              .addTo(map);
+          }
+        };
+        map.on('click', clickHandler);
+        (map as any)._adminClickHandler = clickHandler;
+      })
+      .catch((e) => {
+        console.error('Mapbox loader error:', e);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [showAddStopModal]);
+
+  useEffect(() => {
+    if (showAddStopModal) return;
+    if (mapInstanceRef.current) {
+      const map = mapInstanceRef.current;
+      if ((map as any)._adminClickHandler) {
+        map.off('click', (map as any)._adminClickHandler);
+      }
+      map.remove();
+      mapInstanceRef.current = null;
+    }
+    if (markerRef.current) {
+      markerRef.current.remove();
+      markerRef.current = null;
+    }
+    if (mapContainerRef.current) {
+      mapContainerRef.current.innerHTML = '';
+    }
+  }, [showAddStopModal]);
 
   const fetchProfiles = async () => {
     setLoading(true);
@@ -54,6 +127,85 @@ export function AdminPanel({ onClose }: AdminPanelProps) {
     if (!error) {
       setProfiles(profiles.filter(p => p.id !== userId));
     }
+  };
+
+  const handleImportStops = async () => {
+    if (!hasMapboxToken()) {
+      alert('Добавьте VITE_MAPBOX_TOKEN в переменные окружения.');
+      return;
+    }
+    setImportingStops(true);
+    setImportProgress(0);
+    setImportedStops(0);
+    setSkippedStops(0);
+    setImportError(null);
+
+    try {
+      const stopsFromMapbox = await fetchAllDushanbeStopsFromMapbox();
+      if (stopsFromMapbox.length <= 1 && stopsFromMapbox[0]?.name?.includes('Автовокзал')) {
+        throw new Error('Mapbox API вернуло слишком мало данных. Проверьте токен и лимиты.');
+      }
+      const { data: existingStops } = await supabase
+        .from('stops')
+        .select('name, latitude, longitude');
+
+      const existingKey = new Set(
+        (existingStops || []).map((s) => `${s.name}|${s.latitude.toFixed(6)}|${s.longitude.toFixed(6)}`)
+      );
+
+      const toInsert = stopsFromMapbox.filter((s) => {
+        const key = `${s.name}|${s.latitude.toFixed(6)}|${s.longitude.toFixed(6)}`;
+        if (existingKey.has(key)) return false;
+        existingKey.add(key);
+        return true;
+      });
+
+      const batchSize = 200;
+      let inserted = 0;
+      for (let i = 0; i < toInsert.length; i += batchSize) {
+        const batch = toInsert.slice(i, i + batchSize).map((s) => ({
+          name: s.name,
+          latitude: s.latitude,
+          longitude: s.longitude,
+        }));
+        const { error } = await supabase.from('stops').insert(batch);
+        if (error) {
+          console.error('Import error:', error);
+          throw error;
+        }
+        inserted += batch.length;
+        setImportedStops(inserted);
+        setImportProgress(Math.round((inserted / toInsert.length) * 100));
+      }
+
+      setSkippedStops(stopsFromMapbox.length - toInsert.length);
+    } catch (error: any) {
+      console.error('Import stops failed:', error);
+      setImportError(error?.message || 'Ошибка импорта');
+    } finally {
+      setImportingStops(false);
+    }
+  };
+
+  const handleSaveManualStop = async () => {
+    if (!newStopName.trim() || newStopLat === null || newStopLng === null) {
+      alert('Введите название и выберите точку на карте.');
+      return;
+    }
+    const { error } = await supabase.from('stops').insert({
+      name: newStopName.trim(),
+      latitude: newStopLat,
+      longitude: newStopLng,
+    });
+    if (error) {
+      console.error('Manual stop insert error:', error);
+      alert('Ошибка при добавлении остановки');
+      return;
+    }
+    setNewStopName('');
+    setNewStopLat(null);
+    setNewStopLng(null);
+    setShowAddStopModal(false);
   };
 
   const getRoleName = (role: UserRole) => {
@@ -123,6 +275,57 @@ export function AdminPanel({ onClose }: AdminPanelProps) {
               onChange={(e) => setSearchTerm(e.target.value)}
               className="w-full pl-12 pr-4 py-3.5 border border-gray-300 dark:border-gray-600 rounded-2xl bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-50 focus:ring-2 focus:ring-gray-500 focus:border-transparent outline-none transition-all"
             />
+          </div>
+
+          <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold text-gray-900 dark:text-gray-50">
+                Импорт остановок из Mapbox
+              </p>
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                Загрузит остановки Душанбе и добавит в Supabase (без дублей).
+              </p>
+              {(importedStops > 0 || skippedStops > 0) && (
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                  Добавлено: {importedStops}, пропущено: {skippedStops}
+                </p>
+              )}
+              {importError && (
+                <p className="text-xs text-red-500 mt-1">{importError}</p>
+              )}
+            </div>
+            <div className="flex items-center gap-3">
+              {importingStops && (
+                <span className="text-xs text-gray-500 dark:text-gray-400">
+                  {importProgress}%
+                </span>
+              )}
+              <button
+                onClick={handleImportStops}
+                disabled={importingStops}
+                className="px-4 py-2 bg-gray-900 dark:bg-gray-700 text-white rounded-xl text-sm font-semibold flex items-center gap-2 hover:bg-gray-800 dark:hover:bg-gray-600 disabled:opacity-50"
+              >
+                <DownloadCloud className="w-4 h-4" />
+                {importingStops ? 'Импорт...' : 'Импортировать'}
+              </button>
+            </div>
+          </div>
+
+          <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold text-gray-900 dark:text-gray-50">
+                Добавить остановку вручную
+              </p>
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                Нажмите на карту, задайте имя и сохраните.
+              </p>
+            </div>
+            <button
+              onClick={() => setShowAddStopModal(true)}
+              className="px-4 py-2 bg-gray-900 dark:bg-gray-700 text-white rounded-xl text-sm font-semibold hover:bg-gray-800 dark:hover:bg-gray-600"
+            >
+              Открыть карту
+            </button>
           </div>
 
           {loading ? (
@@ -239,6 +442,50 @@ export function AdminPanel({ onClose }: AdminPanelProps) {
           </div>
         </div>
       </div>
+
+      {showAddStopModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white dark:bg-gray-900 rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden">
+            <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-50">
+                Добавить остановку
+              </h3>
+              <button
+                onClick={() => setShowAddStopModal(false)}
+                className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+              >
+                <X className="w-6 h-6" />
+              </button>
+            </div>
+            <div className="p-4 space-y-3">
+              <input
+                type="text"
+                value={newStopName}
+                onChange={(e) => setNewStopName(e.target.value)}
+                placeholder="Название остановки"
+                className="w-full px-4 py-2.5 rounded-2xl border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-800 text-gray-900 dark:text-gray-50"
+              />
+              <div className="h-96 rounded-2xl overflow-hidden border border-gray-200 dark:border-gray-700">
+                <div ref={mapContainerRef} className="w-full h-full" />
+              </div>
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  onClick={() => setShowAddStopModal(false)}
+                  className="px-4 py-2 rounded-xl bg-gray-200 dark:bg-gray-700 text-gray-900 dark:text-gray-50 font-semibold"
+                >
+                  Отмена
+                </button>
+                <button
+                  onClick={handleSaveManualStop}
+                  className="px-4 py-2 rounded-xl bg-gray-900 dark:bg-gray-700 text-white font-semibold"
+                >
+                  Сохранить
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

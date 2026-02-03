@@ -20,6 +20,8 @@ export function RouteManager({ busNumber, driverId }: RouteManagerProps) {
   const [newRouteStops, setNewRouteStops] = useState<{ stop: Stop; times: string[] }[]>([]);
   const [editingRouteId, setEditingRouteId] = useState<string | null>(null); 
   const [currentTimeInput, setCurrentTimeInput] = useState('');
+  const [pendingStop, setPendingStop] = useState<Stop | null>(null);
+  const [pendingTimes, setPendingTimes] = useState<string[]>([]);
 
   useEffect(() => {
     fetchRoutes();
@@ -69,7 +71,7 @@ export function RouteManager({ busNumber, driverId }: RouteManagerProps) {
     if (!newRouteName.trim() || newRouteStops.length === 0) return;
 
     try {
-      let route: any = null;
+      let route: Route | null = null;
 
       if (editingRouteId) {
         const { data: updated, error: updErr } = await supabase
@@ -90,13 +92,14 @@ export function RouteManager({ busNumber, driverId }: RouteManagerProps) {
         // Replace stops
         await supabase.from('route_stops').delete().eq('route_id', editingRouteId);
       } else {
+        const shouldActivate = !routes.some((r) => r.is_active);
         const { data: created, error: routeError } = await supabase
           .from('routes')
           .insert({
             bus_number: busNumber,
             driver_id: driverId,
             name: newRouteName.trim(),
-            is_active: false,
+            is_active: shouldActivate,
           })
           .select()
           .single();
@@ -107,13 +110,16 @@ export function RouteManager({ busNumber, driverId }: RouteManagerProps) {
           return;
         }
         route = created;
-      }
 
-      if (routeError || !route) {
-        console.error('Error creating route:', routeError);
-        alert('Ошибка при создании маршрута');
-        return;
+        if (shouldActivate) {
+          await supabase
+            .from('routes')
+            .update({ is_active: false })
+            .eq('bus_number', busNumber)
+            .neq('id', route.id);
+        }
       }
+      if (!route) return;
 
       // Add stops to route
       for (let i = 0; i < newRouteStops.length; i++) {
@@ -133,7 +139,9 @@ export function RouteManager({ busNumber, driverId }: RouteManagerProps) {
       setEditingRouteId(null);
       setNewRouteName('');
       setNewRouteStops([]);
-            setCurrentTimeInput('');
+      setCurrentTimeInput('');
+      setPendingStop(null);
+      setPendingTimes([]);
       await fetchRoutes();
       await fetchRouteStops();
     } catch (error: any) {
@@ -180,6 +188,8 @@ const handleStartEditRoute = (route: Route) => {
   setNewRouteName(route.name);
   setNewRouteStops(list);
   setCurrentTimeInput('');
+  setPendingStop(null);
+  setPendingTimes([]);
 };
 
 const handleDeleteRoute = async (routeId: string) => {
@@ -192,8 +202,24 @@ const handleDeleteRoute = async (routeId: string) => {
       console.error('Invalid stop:', stop);
       return;
     }
-    setNewRouteStops([...newRouteStops, { stop, times: currentTimeInput.trim() ? [currentTimeInput.trim()] : [] }]);
-        setCurrentTimeInput('');
+    setPendingStop(stop);
+    setCurrentTimeInput('');
+    setPendingTimes([]);
+  };
+
+  const handleAddPendingTime = () => {
+    const v = currentTimeInput.trim();
+    if (!v) return;
+    setPendingTimes((prev) => [...prev, v]);
+    setCurrentTimeInput('');
+  };
+
+  const handleCommitPendingStop = () => {
+    if (!pendingStop) return;
+    setNewRouteStops((prev) => [...prev, { stop: pendingStop, times: pendingTimes }]);
+    setPendingStop(null);
+    setPendingTimes([]);
+    setCurrentTimeInput('');
   };
 
   const handleRemoveStopFromNewRoute = (index: number) => {
@@ -207,20 +233,22 @@ const handleDeleteRoute = async (routeId: string) => {
         .insert({ name, latitude: lat, longitude: lng })
         .select()
         .single();
-      
+
       if (error) {
         console.error('Error adding stop:', error);
         alert(`Ошибка при добавлении остановки: ${error.message}`);
-        return;
+        return null;
       }
-      
+
       if (newStop) {
-        handleAddStopToNewRoute(newStop as Stop);
-        await fetchStops(); // Refresh stops list
+        await fetchStops();
+        return newStop as Stop;
       }
+      return null;
     } catch (error: any) {
       console.error('Error adding stop:', error);
       alert(`Ошибка при добавлении остановки: ${error.message || 'Неизвестная ошибка'}`);
+      return null;
     }
   };
 
@@ -270,13 +298,41 @@ const handleDeleteRoute = async (routeId: string) => {
                 onAddNew={handleAddNewStop}
                 excludeIds={newRouteStops.map((rs) => rs.stop.id)}
               />
-              <input
-                type="text"
-                value={currentTimeInput}
-                onChange={(e) => setCurrentTimeInput(e.target.value)}
-                placeholder={t('route.stopTime') + ' (08:30)'}
-                className="w-full px-4 py-2.5 rounded-2xl border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-50"
-              />
+              {pendingStop && (
+                <div className="rounded-2xl bg-gray-100 dark:bg-gray-700 p-3 space-y-2">
+                  <p className="text-xs text-gray-500 dark:text-gray-300">
+                    Выбрана остановка: <span className="font-semibold">{pendingStop.name}</span>
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={currentTimeInput}
+                      onChange={(e) => setCurrentTimeInput(e.target.value)}
+                      placeholder={t('route.stopTime') + ' (08:30)'}
+                      className="flex-1 px-4 py-2.5 rounded-2xl border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-50"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleAddPendingTime}
+                      className="px-3 py-2 rounded-xl bg-gray-200 dark:bg-gray-600 text-gray-900 dark:text-gray-50 text-xs font-semibold hover:bg-gray-300 dark:hover:bg-gray-500"
+                    >
+                      +время
+                    </button>
+                  </div>
+                  {pendingTimes.length > 0 && (
+                    <p className="text-[11px] text-gray-500 dark:text-gray-300">
+                      Времена: {pendingTimes.join(', ')}
+                    </p>
+                  )}
+                  <button
+                    type="button"
+                    onClick={handleCommitPendingStop}
+                    className="w-full px-4 py-2 rounded-xl bg-gray-900 dark:bg-gray-700 text-white text-sm font-semibold hover:bg-gray-800 dark:hover:bg-gray-600"
+                  >
+                    Добавить остановку
+                  </button>
+                </div>
+              )}
             </div>
           </div>
 
@@ -339,6 +395,9 @@ const handleDeleteRoute = async (routeId: string) => {
       setEditingRouteId(null);
                 setNewRouteName('');
                 setNewRouteStops([]);
+                setPendingStop(null);
+                setPendingTimes([]);
+                setCurrentTimeInput('');
               }}
               className="px-4 py-2.5 bg-gray-200 dark:bg-gray-600 text-gray-900 dark:text-gray-50 rounded-xl font-semibold hover:bg-gray-300 dark:hover:bg-gray-500 transition-colors"
             >
@@ -435,3 +494,5 @@ const handleDeleteRoute = async (routeId: string) => {
     </div>
   );
 }
+
+

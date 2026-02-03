@@ -1,7 +1,31 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+﻿import { useEffect, useMemo, useRef, useState } from 'react';
 import { BusWithDriver, Stop, Route, RouteStop } from '../types';
 import { supabase } from '../lib/supabase';
 import { useLanguage } from '../contexts/LanguageContext';
+import { getMapboxRoutePolyline } from '../lib/routingMapbox';
+import { loadMapbox } from '../lib/mapboxLoader';
+import { loadNotificationPrefs } from '../lib/notifications';
+
+type LatLng = [number, number];
+
+function haversineKm(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number
+): number {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
 
 interface MapViewProps {
   buses: BusWithDriver[];
@@ -14,7 +38,7 @@ interface MapViewProps {
 
 declare global {
   interface Window {
-    DG: any;
+    mapboxgl: any;
   }
 }
 
@@ -31,54 +55,169 @@ export function MapView({
   const mapInstance = useRef<any>(null);
   const markers = useRef<Map<string, any>>(new Map());
   const userMarker = useRef<any>(null);
-  const routePolylines = useRef<Map<string, any>>(new Map());
+  const routeLayers = useRef<Map<string, { sourceId: string; layerId: string }>>(new Map());
   const routeStopMarkers = useRef<Map<string, any>>(new Map());
+  const stopHoverMarkers = useRef<Map<string, any>>(new Map());
+  const userRouteLayerRef = useRef<{ sourceId: string; layerId: string } | null>(null);
+  const speedHistoryRef = useRef<Map<string, number[]>>(new Map());
+  const lastNotifyRef = useRef<Map<string, number>>(new Map());
   const [mapLoaded, setMapLoaded] = useState(false);
   const [stops, setStops] = useState<Stop[]>([]);
   const [routes, setRoutes] = useState<Route[]>([]);
   const [routeStops, setRouteStops] = useState<RouteStop[]>([]);
+  const [routePaths, setRoutePaths] = useState<Map<string, LatLng[]>>(new Map());
+  const routePathCache = useRef<Map<string, { hash: string; path: LatLng[] }>>(new Map());
+  const [userToStopPath, setUserToStopPath] = useState<LatLng[] | null>(null);
   const [selectedStopId, setSelectedStopId] = useState<string | null>(null);
   const [activeBusFilter, setActiveBusFilter] = useState<string | 'all'>('all');
   const [showRoute, setShowRoute] = useState(false);
 
+  const buildLedHtml = (stopName: string, rows: { bus: string; time: string }[]) => `
+    <div style="background:#0b1117;padding:8px 10px;border-radius:10px;border:1px solid #1f2937;box-shadow:0 6px 18px rgba(0,0,0,.35);min-width:160px;">
+      <div style="color:#9ca3af;font-size:10px;margin-bottom:6px;">Остановка</div>
+      <div style="color:#e5e7eb;font-weight:600;font-size:12px;margin-bottom:6px;">${stopName}</div>
+      <div style="display:flex;flex-direction:column;gap:4px;">
+        ${rows
+          .map(
+            (a) =>
+              `<div style="display:flex;justify-content:space-between;gap:8px;color:#21f35a;font-family:monospace;font-size:11px;">
+                 <span>№${a.bus}</span><span>${a.time}</span>
+               </div>`
+          )
+          .join('')}
+      </div>
+    </div>
+  `;
+
+  const getAiSpeed = (busNumber: string, fallback: number) => {
+    const history = speedHistoryRef.current.get(busNumber) || [];
+    if (history.length >= 3) {
+      const avg = history.reduce((sum, v) => sum + v, 0) / history.length;
+      return Math.max(10, Math.min(50, avg));
+    }
+    return fallback || 25;
+  };
+
   useEffect(() => {
-    const script = document.createElement('script');
-    script.src = 'https://maps.api.2gis.ru/2.0/loader.js?pkg=full';
-    script.async = true;
-    script.onload = () => {
-      if (window.DG) {
-        window.DG.then(() => {
+    let cancelled = false;
+    loadMapbox()
+      .then((mapboxgl) => {
+        if (cancelled || !mapContainer.current || mapInstance.current) return;
+        const map = new mapboxgl.Map({
+          container: mapContainer.current,
+          style: 'mapbox://styles/mapbox/streets-v12',
+          center: [68.7738, 38.5598],
+          zoom: 13,
+          minZoom: 12,
+          maxZoom: 18,
+        });
+
+        map.addControl(new mapboxgl.NavigationControl({ showCompass: false }), 'top-right');
+
+        const bounds = new mapboxgl.LngLatBounds(
+          [68.6738, 38.4598],
+          [68.8738, 38.6598]
+        );
+        map.setMaxBounds(bounds);
+
+        map.on('load', () => {
+          if (cancelled) return;
           setMapLoaded(true);
         });
-      }
-    };
-    document.head.appendChild(script);
+
+        mapInstance.current = map;
+      })
+      .catch((err) => {
+        console.error('Mapbox loader error:', err);
+      });
 
     return () => {
+      cancelled = true;
       if (mapInstance.current) {
         mapInstance.current.remove();
+        mapInstance.current = null;
       }
     };
   }, []);
 
   useEffect(() => {
-    if (!mapLoaded || !mapContainer.current || mapInstance.current) return;
+    if (!selectedStopId || !userLocation) {
+      setUserToStopPath(null);
+      return;
+    }
+    const stop = stops.find((s) => s.id === selectedStopId);
+    if (!stop) {
+      setUserToStopPath(null);
+      return;
+    }
 
-    const map = window.DG.map(mapContainer.current, {
-      center: [38.5598, 68.7738],
-      zoom: 13,
-      minZoom: 12,
-      maxZoom: 18,
-    });
+    let cancelled = false;
+    const loadPath = async () => {
+      const path =
+        (await getMapboxRoutePolyline([
+          { lat: userLocation.lat, lng: userLocation.lng },
+          { lat: stop.latitude, lng: stop.longitude },
+        ])) || [
+          [userLocation.lat, userLocation.lng] as LatLng,
+          [stop.latitude, stop.longitude] as LatLng,
+        ];
 
-    const bounds = window.DG.latLngBounds(
-      [38.4598, 68.6738],
-      [38.6598, 68.8738]
-    );
-    map.setMaxBounds(bounds);
+      if (!cancelled) setUserToStopPath(path);
+    };
 
-    mapInstance.current = map;
-  }, [mapLoaded]);
+    loadPath();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedStopId, userLocation, stops]);
+
+  // Build route paths with Mapbox routing when needed
+  useEffect(() => {
+    if (!showRoute) return;
+
+    let cancelled = false;
+    const loadRoutes = async () => {
+      const filteredRoutes = routes.filter(
+        (route) => activeBusFilter === 'all' || route.bus_number === activeBusFilter
+      );
+
+      const nextPaths = new Map(routePaths);
+
+      for (const route of filteredRoutes) {
+        const stopsForRoute = routeStops
+          .filter((rs) => rs.route_id === route.id)
+          .sort((a, b) => a.order_index - b.order_index)
+          .map((rs) => stops.find((s) => s.id === rs.stop_id))
+          .filter((s): s is Stop => !!s);
+
+        if (stopsForRoute.length < 2) continue;
+
+        const hash = stopsForRoute
+          .map((s) => `${s.id}:${s.latitude.toFixed(5)}:${s.longitude.toFixed(5)}`)
+          .join('|');
+        const cached = routePathCache.current.get(route.id);
+        if (cached && cached.hash === hash) {
+          nextPaths.set(route.id, cached.path);
+          continue;
+        }
+
+        const path =
+          (await getMapboxRoutePolyline(
+            stopsForRoute.map((s) => ({ lat: s.latitude, lng: s.longitude }))
+          )) || stopsForRoute.map((s) => [s.latitude, s.longitude] as LatLng);
+
+        routePathCache.current.set(route.id, { hash, path });
+        nextPaths.set(route.id, path);
+      }
+
+      if (!cancelled) setRoutePaths(nextPaths);
+    };
+
+    loadRoutes();
+    return () => {
+      cancelled = true;
+    };
+  }, [showRoute, routes, routeStops, stops, activeBusFilter]);
 
   // Load routes and route stops
   useEffect(() => {
@@ -131,37 +270,47 @@ export function MapView({
 
   // Update bus markers
   useEffect(() => {
-    if (!mapInstance.current) return;
+    if (!mapInstance.current || !mapLoaded) return;
 
     const filteredBuses = buses.filter(
       (bus) => activeBusFilter === 'all' || bus.bus_number === activeBusFilter
     );
 
     filteredBuses.forEach((bus) => {
+      const list = speedHistoryRef.current.get(bus.bus_number) || [];
+      const speed = Number.isFinite(bus.speed) ? bus.speed : 0;
+      if (speed > 0) {
+        const next = [...list.slice(-9), speed];
+        speedHistoryRef.current.set(bus.bus_number, next);
+      }
+    });
+
+    filteredBuses.forEach((bus) => {
       const existingMarker = markers.current.get(bus.id);
 
       if (existingMarker) {
-        existingMarker.setLatLng([bus.latitude, bus.longitude]);
+        existingMarker.setLngLat([bus.longitude, bus.latitude]);
       } else {
-        const busIcon = window.DG.icon({
-          iconUrl: 'data:image/svg+xml;base64,' + btoa(`
-            <svg width="32" height="32" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
-              <rect x="4" y="8" width="24" height="18" rx="3" fill="#3B82F6" stroke="white" stroke-width="2"/>
-              <rect x="7" y="11" width="8" height="6" rx="1" fill="white" opacity="0.9"/>
-              <rect x="17" y="11" width="8" height="6" rx="1" fill="white" opacity="0.9"/>
-              <circle cx="10" cy="24" r="2" fill="white"/>
-              <circle cx="22" cy="24" r="2" fill="white"/>
-            </svg>
-          `),
-          iconSize: [32, 32],
-          iconAnchor: [16, 16],
-        });
+        const el = document.createElement('div');
+        el.style.width = '32px';
+        el.style.height = '32px';
+        el.style.backgroundSize = '32px 32px';
+        el.style.backgroundImage = `url("data:image/svg+xml;base64,${btoa(`
+          <svg width="32" height="32" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
+            <rect x="4" y="8" width="24" height="18" rx="3" fill="#3B82F6" stroke="white" stroke-width="2"/>
+            <rect x="7" y="11" width="8" height="6" rx="1" fill="white" opacity="0.9"/>
+            <rect x="17" y="11" width="8" height="6" rx="1" fill="white" opacity="0.9"/>
+            <circle cx="10" cy="24" r="2" fill="white"/>
+            <circle cx="22" cy="24" r="2" fill="white"/>
+          </svg>
+        `)}")`;
+        el.style.cursor = 'pointer';
 
-        const marker = window.DG.marker([bus.latitude, bus.longitude], {
-          icon: busIcon,
-        }).addTo(mapInstance.current);
+        const marker = new window.mapboxgl.Marker({ element: el })
+          .setLngLat([bus.longitude, bus.latitude])
+          .addTo(mapInstance.current);
 
-        marker.on('click', () => onBusClick(bus));
+        marker.getElement().addEventListener('click', () => onBusClick(bus));
         markers.current.set(bus.id, marker);
       }
     });
@@ -172,38 +321,73 @@ export function MapView({
         markers.current.delete(id);
       }
     });
-  }, [buses, onBusClick, activeBusFilter]);
+  }, [buses, onBusClick, activeBusFilter, mapLoaded]);
 
   // Update user marker
   useEffect(() => {
-    if (!mapInstance.current || !userLocation) return;
+    if (!mapInstance.current || !mapLoaded || !userLocation) return;
 
     if (userMarker.current) {
-      userMarker.current.setLatLng([userLocation.lat, userLocation.lng]);
+      userMarker.current.setLngLat([userLocation.lng, userLocation.lat]);
     } else {
-      const userIcon = window.DG.icon({
-        iconUrl: 'data:image/svg+xml;base64,' + btoa(`
-          <svg width="24" height="24" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-            <circle cx="12" cy="12" r="8" fill="#EF4444" stroke="white" stroke-width="3"/>
-            <circle cx="12" cy="12" r="4" fill="white"/>
-          </svg>
-        `),
-        iconSize: [24, 24],
-        iconAnchor: [12, 12],
-      });
+      const el = document.createElement('div');
+      el.style.width = '24px';
+      el.style.height = '24px';
+      el.style.backgroundSize = '24px 24px';
+      el.style.backgroundImage = `url("data:image/svg+xml;base64,${btoa(`
+        <svg width="24" height="24" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="12" cy="12" r="8" fill="#EF4444" stroke="white" stroke-width="3"/>
+          <circle cx="12" cy="12" r="4" fill="white"/>
+        </svg>
+      `)}")`;
 
-      userMarker.current = window.DG.marker([userLocation.lat, userLocation.lng], {
-        icon: userIcon,
-      }).addTo(mapInstance.current);
+      userMarker.current = new window.mapboxgl.Marker({ element: el })
+        .setLngLat([userLocation.lng, userLocation.lat])
+        .addTo(mapInstance.current);
     }
-  }, [userLocation]);
+  }, [userLocation, mapLoaded]);
+
+  useEffect(() => {
+    if (!mapInstance.current || !mapLoaded) return;
+    const map = mapInstance.current;
+    const sourceId = 'user-stop-route';
+    const layerId = 'user-stop-route-line';
+
+    if (!userToStopPath || userToStopPath.length < 2) {
+      if (map.getLayer(layerId)) map.removeLayer(layerId);
+      if (map.getSource(sourceId)) map.removeSource(sourceId);
+      userRouteLayerRef.current = null;
+      return;
+    }
+
+    const lineCoords = userToStopPath.map((p) => [p[1], p[0]]);
+    const geojson = { type: 'Feature', geometry: { type: 'LineString', coordinates: lineCoords } };
+
+    if (map.getSource(sourceId)) {
+      map.getSource(sourceId).setData(geojson);
+    } else {
+      map.addSource(sourceId, { type: 'geojson', data: geojson });
+      map.addLayer({
+        id: layerId,
+        type: 'line',
+        source: sourceId,
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: { 'line-color': '#10b981', 'line-width': 4, 'line-opacity': 0.85 },
+      });
+    }
+
+    userRouteLayerRef.current = { sourceId, layerId };
+  }, [userToStopPath, mapLoaded]);
 
   // Draw active routes
   useEffect(() => {
-    if (!mapInstance.current || !showRoute) {
-      // Remove all route polylines and markers
-      routePolylines.current.forEach((polyline) => polyline.remove());
-      routePolylines.current.clear();
+    if (!mapInstance.current || !mapLoaded || !showRoute) {
+      routeLayers.current.forEach(({ layerId, sourceId }) => {
+        if (!mapInstance.current) return;
+        if (mapInstance.current.getLayer(layerId)) mapInstance.current.removeLayer(layerId);
+        if (mapInstance.current.getSource(sourceId)) mapInstance.current.removeSource(sourceId);
+      });
+      routeLayers.current.clear();
       routeStopMarkers.current.forEach((marker) => marker.remove());
       routeStopMarkers.current.clear();
       return;
@@ -222,23 +406,32 @@ export function MapView({
 
       if (stopsForRoute.length < 2) return;
 
-      // Remove existing polyline for this route
-      const existingPolyline = routePolylines.current.get(route.id);
-      if (existingPolyline) {
-        existingPolyline.remove();
+      const latlngs = routePaths.get(route.id) || stopsForRoute.map((s) => [s.latitude, s.longitude]);
+      const lineCoords = latlngs.map((p) => [p[1], p[0]]);
+      const sourceId = `route-source-${route.id}`;
+      const layerId = `route-layer-${route.id}`;
+
+      const geojson = {
+        type: 'Feature',
+        geometry: { type: 'LineString', coordinates: lineCoords },
+      };
+
+      if (mapInstance.current.getSource(sourceId)) {
+        mapInstance.current.getSource(sourceId).setData(geojson);
+      } else {
+        mapInstance.current.addSource(sourceId, { type: 'geojson', data: geojson });
+        mapInstance.current.addLayer({
+          id: layerId,
+          type: 'line',
+          source: sourceId,
+          layout: { 'line-join': 'round', 'line-cap': 'round' },
+          paint: { 'line-color': '#2563eb', 'line-width': 4 },
+        });
       }
 
-      // Create polyline
-      const latlngs = stopsForRoute.map((s) => [s.latitude, s.longitude]);
-      const polyline = window.DG.polyline(latlngs, {
-        color: '#2563eb',
-        weight: 4,
-      }).addTo(mapInstance.current);
+      routeLayers.current.set(route.id, { sourceId, layerId });
 
-      routePolylines.current.set(route.id, polyline);
-
-      // Add stop markers with time
-      stopsForRoute.forEach((stop, index) => {
+      stopsForRoute.forEach((stop) => {
         const routeStop = routeStops.find(
           (rs) => rs.route_id === route.id && rs.stop_id === stop.id
         );
@@ -246,34 +439,30 @@ export function MapView({
 
         if (routeStopMarkers.current.has(markerKey)) return;
 
-        const stopIcon = window.DG.icon({
-          iconUrl: 'data:image/svg+xml;base64,' + btoa(`
-            <svg width="20" height="20" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-              <circle cx="12" cy="12" r="9" fill="#2563eb" />
-              <circle cx="12" cy="12" r="4" fill="white" />
-            </svg>
-          `),
-          iconSize: [20, 20],
-          iconAnchor: [10, 10],
-        });
+        const el = document.createElement('div');
+        el.style.width = '20px';
+        el.style.height = '20px';
+        el.style.backgroundSize = '20px 20px';
+        el.style.backgroundImage = `url("data:image/svg+xml;base64,${btoa(`
+          <svg width="20" height="20" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="12" cy="12" r="9" fill="#2563eb" />
+            <circle cx="12" cy="12" r="4" fill="white" />
+          </svg>
+        `)}")`;
 
-        const marker = window.DG.marker([stop.latitude, stop.longitude], {
-          icon: stopIcon,
-        }).addTo(mapInstance.current);
+        const marker = new window.mapboxgl.Marker({ element: el })
+          .setLngLat([stop.longitude, stop.latitude])
+          .addTo(mapInstance.current);
 
-        const popupContent = routeStop?.arrival_time
-          ? `${stop.name}<br><small>${routeStop.arrival_time}</small>`
-          : stop.name;
-        marker.bindPopup(popupContent);
         routeStopMarkers.current.set(markerKey, marker);
       });
     });
 
-    // Clean up routes that are no longer active
-    routePolylines.current.forEach((polyline, routeId) => {
+    routeLayers.current.forEach(({ sourceId, layerId }, routeId) => {
       if (!filteredRoutes.find((r) => r.id === routeId)) {
-        polyline.remove();
-        routePolylines.current.delete(routeId);
+        if (mapInstance.current.getLayer(layerId)) mapInstance.current.removeLayer(layerId);
+        if (mapInstance.current.getSource(sourceId)) mapInstance.current.removeSource(sourceId);
+        routeLayers.current.delete(routeId);
       }
     });
 
@@ -284,12 +473,215 @@ export function MapView({
         routeStopMarkers.current.delete(key);
       }
     });
-  }, [routes, routeStops, stops, showRoute, activeBusFilter]);
+  }, [routes, routeStops, stops, showRoute, activeBusFilter, routePaths, mapLoaded]);
+
+  useEffect(() => {
+    if (!mapInstance.current || !mapLoaded) return;
+    const map = mapInstance.current;
+
+    stopHoverMarkers.current.forEach((marker) => marker.remove());
+    stopHoverMarkers.current.clear();
+
+    const activeRoutes = routes.filter(
+      (route) =>
+        route.is_active && (activeBusFilter === 'all' || route.bus_number === activeBusFilter)
+    );
+    if (activeRoutes.length === 0) return;
+
+    const routeById = new Map(activeRoutes.map((r) => [r.id, r]));
+    const arrivalsByStop = new Map<string, { stop: Stop; arrivals: { bus: string; time: string }[] }>();
+
+    routeStops.forEach((rs) => {
+      const route = routeById.get(rs.route_id);
+      if (!route) return;
+      const stop = stops.find((s) => s.id === rs.stop_id);
+      if (!stop) return;
+      const busNum = route.bus_number;
+
+      let timeText = rs.arrival_time || '';
+      if (!timeText) {
+        const bus = buses.find((b) => b.bus_number === busNum);
+        if (bus) {
+          const dist = haversineKm(bus.latitude, bus.longitude, stop.latitude, stop.longitude);
+          const speed = getAiSpeed(bus.bus_number, bus.speed || 25);
+          const eta = Math.round((dist / speed) * 60);
+          timeText = `≈ ${eta} мин`;
+        } else {
+          timeText = '—';
+        }
+      }
+
+      const entry = arrivalsByStop.get(stop.id) || { stop, arrivals: [] };
+      entry.arrivals.push({ bus: busNum, time: timeText });
+      arrivalsByStop.set(stop.id, entry);
+    });
+
+    arrivalsByStop.forEach(({ stop, arrivals }) => {
+      const sorted = arrivals.slice(0, 3);
+      const html = `
+        <div style="background:#0b1117;padding:8px 10px;border-radius:10px;border:1px solid #1f2937;box-shadow:0 6px 18px rgba(0,0,0,.35);min-width:160px;">
+          <div style="color:#9ca3af;font-size:10px;margin-bottom:6px;">Остановка</div>
+          <div style="color:#e5e7eb;font-weight:600;font-size:12px;margin-bottom:6px;">${stop.name}</div>
+          <div style="display:flex;flex-direction:column;gap:4px;">
+            ${sorted
+              .map(
+                (a) =>
+                  `<div style="display:flex;justify-content:space-between;gap:8px;color:#21f35a;font-family:monospace;font-size:11px;">
+                     <span>№${a.bus}</span><span>${a.time}</span>
+                   </div>`
+              )
+              .join('')}
+          </div>
+        </div>
+      `;
+
+      const el = document.createElement('div');
+      el.style.width = '10px';
+      el.style.height = '10px';
+      el.style.background = '#22c55e';
+      el.style.border = '2px solid #0b1117';
+      el.style.borderRadius = '999px';
+
+      const marker = new window.mapboxgl.Marker({ element: el })
+        .setLngLat([stop.longitude, stop.latitude])
+        .addTo(map);
+
+      const popup = new window.mapboxgl.Popup({ closeButton: false, closeOnClick: false })
+        .setHTML(html);
+      marker.setPopup(popup);
+      marker.getElement().addEventListener('mouseenter', () => marker.togglePopup());
+      marker.getElement().addEventListener('mouseleave', () => marker.togglePopup());
+
+      stopHoverMarkers.current.set(stop.id, marker);
+    });
+  }, [routes, routeStops, stops, buses, activeBusFilter, mapLoaded]);
+
+  useEffect(() => {
+    const prefs = loadNotificationPrefs();
+    if (!prefs.enabled || !('Notification' in window) || Notification.permission !== 'granted') {
+      return;
+    }
+
+    const now = Date.now();
+    const notifyIfDue = (key: string, title: string, body: string) => {
+      const last = lastNotifyRef.current.get(key) || 0;
+      if (now - last < 5 * 60 * 1000) return;
+      new Notification(title, { body });
+      lastNotifyRef.current.set(key, now);
+    };
+
+    if (prefs.busIds.length > 0 && userLocation) {
+      prefs.busIds.forEach((id) => {
+        const bus = buses.find((b) => b.id === id);
+        if (!bus) return;
+        const dist = haversineKm(bus.latitude, bus.longitude, userLocation.lat, userLocation.lng);
+        const speed = getAiSpeed(bus.bus_number, bus.speed || 25);
+        const eta = Math.round((dist / speed) * 60);
+        if (eta > 2) return;
+        notifyIfDue(
+          `bus:${id}`,
+          `Автобус №${bus.bus_number}`,
+          `Подъезжает к вам (≈ ${eta} мин)`
+        );
+      });
+    }
+
+    if (prefs.busNumbers.length > 0 && userLocation) {
+      prefs.busNumbers.forEach((num) => {
+        const bus = buses.find((b) => b.bus_number === num);
+        if (!bus) return;
+        const dist = haversineKm(bus.latitude, bus.longitude, userLocation.lat, userLocation.lng);
+        const speed = getAiSpeed(bus.bus_number, bus.speed || 25);
+        const eta = Math.round((dist / speed) * 60);
+        if (eta > 2) return;
+        notifyIfDue(
+          `busnum:${num}`,
+          `Автобус №${num}`,
+          `Подъезжает к вам (≈ ${eta} мин)`
+        );
+      });
+    }
+
+    if (prefs.stopIds.length > 0) {
+      prefs.stopIds.forEach((stopId) => {
+        const stop = stops.find((s) => s.id === stopId);
+        if (!stop) return;
+        const busesPassing = routes
+          .filter((r) => r.is_active)
+          .filter((r) => routeStops.some((rs) => rs.route_id === r.id && rs.stop_id === stopId))
+          .map((r) => r.bus_number);
+
+        busesPassing.forEach((busNum) => {
+          const bus = buses.find((b) => b.bus_number === busNum);
+          if (!bus) return;
+          const dist = haversineKm(bus.latitude, bus.longitude, stop.latitude, stop.longitude);
+          const speed = getAiSpeed(busNum, bus.speed || 25);
+          const eta = Math.round((dist / speed) * 60);
+          if (eta <= 2) {
+            notifyIfDue(
+              `stop:${stopId}:${busNum}`,
+              `Автобус №${busNum}`,
+              `Подъезжает к остановке ${stop.name} (≈ ${eta} мин)`
+            );
+          }
+        });
+      });
+    }
+  }, [buses, routes, routeStops, stops, userLocation]);
 
   const selectedStop = useMemo(
     () => stops.find((s) => s.id === selectedStopId) || null,
     [selectedStopId, stops]
   );
+
+  const liveQueue = useMemo(() => {
+    if (!showRoute || activeBusFilter === 'all') return [];
+    const activeRoute = routes.find(
+      (r) => r.is_active && r.bus_number === activeBusFilter
+    );
+    if (!activeRoute) return [];
+
+    const stopsForRoute = routeStops
+      .filter((rs) => rs.route_id === activeRoute.id)
+      .sort((a, b) => a.order_index - b.order_index)
+      .map((rs) => stops.find((s) => s.id === rs.stop_id))
+      .filter((s): s is Stop => !!s);
+
+    if (stopsForRoute.length === 0) return [];
+
+    return buses
+      .filter((b) => b.bus_number === activeBusFilter)
+      .map((bus) => {
+        let bestIndex = 0;
+        let bestDist = Number.POSITIVE_INFINITY;
+        stopsForRoute.forEach((stop, idx) => {
+          const dist = haversineKm(
+            bus.latitude,
+            bus.longitude,
+            stop.latitude,
+            stop.longitude
+          );
+          if (dist < bestDist) {
+            bestDist = dist;
+            bestIndex = idx;
+          }
+        });
+        const nextStop = stopsForRoute[bestIndex];
+        const speed = getAiSpeed(bus.bus_number, bus.speed || 25);
+        const etaMinutes = Math.round((bestDist / speed) * 60);
+        return {
+          bus,
+          nextStop,
+          etaMinutes,
+          stopIndex: bestIndex,
+          distanceKm: bestDist,
+        };
+      })
+      .sort((a, b) => {
+        if (a.stopIndex !== b.stopIndex) return a.stopIndex - b.stopIndex;
+        return a.distanceKm - b.distanceKm;
+      });
+  }, [showRoute, activeBusFilter, routes, routeStops, stops, buses]);
 
   return (
     <div className="w-full h-full relative">
@@ -333,6 +725,29 @@ export function MapView({
               {showRoute ? t('map.hideRoute') : t('map.showRoute')}
             </button>
           )}
+        </div>
+      )}
+
+      {showRoute && activeBusFilter !== 'all' && liveQueue.length > 0 && (
+        <div className="absolute top-14 right-3 bg-white/95 dark:bg-gray-900/95 rounded-2xl shadow-lg p-3 text-[11px] z-10 border border-gray-200 dark:border-gray-700 max-w-[220px]">
+          <p className="font-semibold text-gray-900 dark:text-gray-50 mb-2">
+            Живая очередь
+          </p>
+          <div className="space-y-2">
+            {liveQueue.map((item) => (
+              <div key={item.bus.id} className="flex flex-col">
+                <span className="text-gray-900 dark:text-gray-50 font-semibold">
+                  Автобус №{item.bus.bus_number}
+                </span>
+                <span className="text-gray-500 dark:text-gray-400">
+                  След. остановка: {item.nextStop.name}
+                </span>
+                <span className="text-gray-500 dark:text-gray-400">
+                  ≈ {item.etaMinutes} мин
+                </span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

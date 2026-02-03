@@ -97,3 +97,13 @@ export interface Review {
   updated_at: string;
   user?: Profile;
 }
+
+export interface BusFeedback {
+  id: string;
+  bus_number: string;
+  user_id: string;
+  crowd_level: number | null;
+  complaint: string | null;
+  created_at: string;
+  user?: Profile;
+}
