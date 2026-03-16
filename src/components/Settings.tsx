@@ -5,6 +5,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { useLanguage, Language } from '../contexts/LanguageContext';
 import { UserRole } from '../types';
 import { supabase } from '../lib/supabase';
+import { fetchDushanbeRouteCatalog } from '../lib/busmaps';
 
 interface SettingsProps {
   onClose: () => void;
@@ -17,6 +18,8 @@ export function Settings({ onClose, onOpenAdmin }: SettingsProps) {
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [busNumber, setBusNumber] = useState('');
+  const [availableBuses, setAvailableBuses] = useState<Array<{ id: string; bus_number: string; route_name: string | null }>>([]);
+  const [loadingBuses, setLoadingBuses] = useState(false);
   const [saving, setSaving] = useState(false);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const [cropOpen, setCropOpen] = useState(false);
@@ -37,6 +40,60 @@ export function Settings({ onClose, onOpenAdmin }: SettingsProps) {
   const hydratingRef = useRef(false);
   const dirtyRef = useRef(false);
   const CROP_SIZE = 240;
+  useEffect(() => {
+    const fetchAvailableBuses = async () => {
+      if (profile?.role !== UserRole.DRIVER) {
+        setAvailableBuses([]);
+        return;
+      }
+
+      setLoadingBuses(true);
+      const { data, error } = await supabase
+        .from('routes')
+        .select('id,bus_number,name,is_active')
+        .order('bus_number', { ascending: true });
+
+      if (!error && data) {
+        const rows = data as any[];
+        const preferredRows = rows.some((row) => row?.is_active) ? rows.filter((row) => row?.is_active) : rows;
+        const uniq = new Map<string, { id: string; bus_number: string; route_name: string | null }>();
+
+        preferredRows.forEach((r) => {
+          if (!r?.bus_number) return;
+          if (!uniq.has(r.bus_number)) {
+            uniq.set(r.bus_number, {
+              id: String(r.id || r.bus_number),
+              bus_number: String(r.bus_number),
+              route_name: typeof r.name === 'string' ? r.name : null,
+            });
+          }
+        });
+
+        setAvailableBuses(Array.from(uniq.values()));
+      } else {
+        setAvailableBuses([]);
+      }
+
+      if ((!error && data && data.length === 0) || error) {
+        try {
+          const busMapsRoutes = await fetchDushanbeRouteCatalog(language);
+          setAvailableBuses(
+            busMapsRoutes.map((route) => ({
+              id: route.id,
+              bus_number: route.bus_number,
+              route_name: route.route_name,
+            }))
+          );
+        } catch {
+          // ignore and keep local fallback result
+        }
+      }
+
+      setLoadingBuses(false);
+    };
+
+    fetchAvailableBuses();
+  }, [profile?.role, language]);
 
   useEffect(() => {
     if (profile) {
@@ -93,24 +150,6 @@ export function Settings({ onClose, onOpenAdmin }: SettingsProps) {
     setMessage('');
     try {
       await updateProfile(payload);
-      // If bus_number changed and user is DRIVER, update all routes for this driver
-      if (
-        profile?.role === UserRole.DRIVER &&
-        lastSavedRef.current?.bus_number !== payload.bus_number &&
-        payload.bus_number !== null &&
-        user
-      ) {
-        const { error: updateRoutesError } = await supabase
-          .from('routes')
-          .update({ bus_number: payload.bus_number })
-          .eq('driver_id', user.id);
-
-        if (updateRoutesError) {
-          console.error('Error updating routes bus_number:', updateRoutesError);
-          setMessage('Ошибка при обновлении номеров автобусов в маршрутах');
-          setTimeout(() => setMessage(''), 3000);
-        }
-      }
       lastSavedRef.current = payload;
       dirtyRef.current = false;
     } catch (error) {
@@ -411,16 +450,21 @@ export function Settings({ onClose, onOpenAdmin }: SettingsProps) {
             <label className="block text-sm font-semibold text-gray-900 dark:text-gray-50 mb-3">
               {t('settings.busNumber')}
             </label>
-            <input
-            type="text"
-            value={busNumber}
-            onChange={(e) => {
-              dirtyRef.current = true;
-              setBusNumber(e.target.value);
-            }}
+            <select
+              value={busNumber}
+              onChange={(e) => {
+                dirtyRef.current = true;
+                setBusNumber(e.target.value);
+              }}
               className="w-full px-5 py-3.5 border border-gray-300 dark:border-gray-600 rounded-2xl bg-gray-50 dark:bg-gray-900 text-base text-gray-900 dark:text-gray-50 focus:ring-2 focus:ring-gray-500 focus:border-transparent outline-none transition-all"
-              placeholder="1"
-            />
+            >
+              <option value="">{loadingBuses ? 'Загрузка автобусов...' : 'Выберите автобус'}</option>
+              {availableBuses.map((bus) => (
+                <option key={bus.id} value={bus.bus_number}>
+                  №{bus.bus_number}{bus.route_name ? ` - ${bus.route_name}` : ""}
+                </option>
+              ))}
+            </select>
           </div>
         )}
 
@@ -510,7 +554,7 @@ export function Settings({ onClose, onOpenAdmin }: SettingsProps) {
 
       {profile?.role === UserRole.DRIVER && (
         <div className="text-xs text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 rounded-2xl p-4">
-          Для водителя: в разделе «Карта» вы можете создать свой маршрут по остановкам и видеть синюю линию пути автобуса.
+          Для водителя: номер автобуса выбирается только из официального списка BusMaps, а маршруты редактируются администратором через синхронизацию.
         </div>
       )}
 
@@ -652,3 +696,6 @@ export function Settings({ onClose, onOpenAdmin }: SettingsProps) {
     </div>
   );
 }
+
+
+

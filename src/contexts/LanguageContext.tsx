@@ -1,4 +1,5 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import { repairUtf8Text } from '../lib/text';
 
 export type Language = 'ru' | 'tj' | 'eng';
 
@@ -124,7 +125,7 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
   };
 
   const t = (key: string): string => {
-    return translations[key]?.[language] || key;
+    return repairUtf8Text(translations[key]?.[language] || key);
   };
 
   return (

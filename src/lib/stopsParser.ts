@@ -1,4 +1,4 @@
-п»ї// Utility functions to fetch public transport stops from Mapbox.
+// Utility functions to fetch public transport stops from Mapbox.
 // IMPORTANT:
 // - Use the official Mapbox APIs (requires an access token).
 // - Do NOT scrape third-party map pages.
@@ -10,7 +10,7 @@ export interface StopData {
 }
 
 const FALLBACK_DUSHANBE_STOPS: StopData[] = [
-  { name: 'РђРІС‚РѕРІРѕРєР·Р°Р»', latitude: 38.5598, longitude: 68.7738 },
+  { name: 'Автовокзал', latitude: 38.5598, longitude: 68.7738 },
 ];
 
 const DUSHANBE_BBOX: [number, number, number, number] = [68.6738, 38.4598, 68.8738, 38.6598];
@@ -28,10 +28,10 @@ export function hasMapboxToken(): boolean {
 function isLikelyStop(name: string, category?: string): boolean {
   const lower = `${name} ${category ?? ''}`.toLowerCase();
   return (
-    lower.includes('РѕСЃС‚Р°РЅРѕРІ') ||
+    lower.includes('останов') ||
     lower.includes('bus stop') ||
-    lower.includes('Р°РІС‚РѕР±СѓСЃ') ||
-    lower.includes('СЃС‚Р°РЅС†') ||
+    lower.includes('автобус') ||
+    lower.includes('станц') ||
     lower.includes('station')
   );
 }
@@ -78,7 +78,7 @@ export async function searchStopsFromMapbox(query: string): Promise<StopData[]> 
   const results = await mapboxSearch(query, DUSHANBE_BBOX);
   if (results.length) return results.slice(0, 10);
 
-  const fallback = await mapboxSearch(`${query} РѕСЃС‚Р°РЅРѕРІРєР°`, DUSHANBE_BBOX);
+  const fallback = await mapboxSearch(`${query} остановка`, DUSHANBE_BBOX);
   return fallback.slice(0, 10);
 }
 
@@ -97,7 +97,7 @@ export async function fetchAllDushanbeStopsFromMapbox(): Promise<StopData[]> {
   const steps = 4;
   const lngStep = (maxLng - minLng) / steps;
   const latStep = (maxLat - minLat) / steps;
-  const queries = ['РѕСЃС‚Р°РЅРѕРІРєР°', 'bus stop'];
+  const queries = ['остановка', 'bus stop'];
 
   for (let i = 0; i < steps; i += 1) {
     for (let j = 0; j < steps; j += 1) {
@@ -110,7 +110,7 @@ export async function fetchAllDushanbeStopsFromMapbox(): Promise<StopData[]> {
 
       for (const q of queries) {
         const chunk = await mapboxSearch(q, cell);
-        chunk.forEach((s) => {
+        chunk.forEach((s: any) => {
           const k = `${s.name}|${s.latitude.toFixed(6)}|${s.longitude.toFixed(6)}`;
           if (!seen.has(k)) {
             seen.add(k);
@@ -123,3 +123,4 @@ export async function fetchAllDushanbeStopsFromMapbox(): Promise<StopData[]> {
 
   return result.length ? result : FALLBACK_DUSHANBE_STOPS;
 }
+

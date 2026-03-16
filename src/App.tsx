@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import { MapPin, LogIn, Map, Clock4, Settings as SettingsIcon, Globe } from 'lucide-react';
+﻿import { useEffect, useRef, useState } from 'react';
+import { MapPin, LogIn, Map, Clock4, Settings as SettingsIcon } from 'lucide-react';
 import { useAuth } from './contexts/AuthContext';
 import { useLanguage, Language } from './contexts/LanguageContext';
 import { useGeolocation } from './hooks/useGeolocation';
@@ -11,106 +11,108 @@ import { AdminPanel } from './components/AdminPanel';
 import { BusInfo } from './components/BusInfo';
 import { BusWithDriver, UserRole } from './types';
 import { ScheduleView } from './components/ScheduleView';
+import { fetchDushanbeLiveBuses } from './lib/busmaps';
 
 type MainTab = 'map' | 'schedule' | 'settings';
+const BUSMAPS_LIVE_ENABLED = (import.meta as any).env?.VITE_BUSMAPS_ENABLE_LIVE === 'true';
 
 function App() {
   const { user, profile, loading: authLoading } = useAuth();
   const { t, language, setLanguage } = useLanguage();
+
   const [showAuth, setShowAuth] = useState(false);
   const [showAdmin, setShowAdmin] = useState(false);
   const [buses, setBuses] = useState<BusWithDriver[]>([]);
   const [selectedBus, setSelectedBus] = useState<BusWithDriver | null>(null);
   const [guestMode, setGuestMode] = useState(false);
   const [activeTab, setActiveTab] = useState<MainTab>('map');
-  const [languageChanging, setLanguageChanging] = useState(false);
+
+  const nextBusmapsTryAtRef = useRef<number>(0);
+  const location = useGeolocation(!!user || guestMode);
+  const isDriver = profile?.role === UserRole.DRIVER;
 
   const handleLanguageChange = (lang: Language) => {
     if (lang === language) return;
-    setLanguageChanging(true);
-    setTimeout(() => {
-      setLanguage(lang);
-      setTimeout(() => setLanguageChanging(false), 200);
-    }, 200);
+    setTimeout(() => setLanguage(lang), 120);
   };
 
-  const isDriver = profile?.role === UserRole.DRIVER;
-  const location = useGeolocation(!!user || guestMode);
-
   useEffect(() => {
-    if (!user && !guestMode && !authLoading) {
-      setShowAuth(true);
-    }
+    if (!user && !guestMode && !authLoading) setShowAuth(true);
   }, [user, guestMode, authLoading]);
 
   useEffect(() => {
     if (!user && !guestMode) return;
 
+    const fetchBuses = async () => {
+      const now = Date.now();
+
+      if (BUSMAPS_LIVE_ENABLED && now >= nextBusmapsTryAtRef.current) {
+        try {
+          const liveFromBusMaps = await fetchDushanbeLiveBuses(language);
+          if (liveFromBusMaps.length > 0) {
+            setBuses(liveFromBusMaps);
+            nextBusmapsTryAtRef.current = now + 30_000;
+            return;
+          }
+          nextBusmapsTryAtRef.current = now + 10 * 60_000;
+        } catch (err: any) {
+          const msg = String(err?.message || '');
+          nextBusmapsTryAtRef.current = msg.includes('429') ? now + 30 * 60_000 : now + 10 * 60_000;
+        }
+      }
+
+      const { data, error } = await supabase
+        .from('bus_locations')
+        .select('*')
+        .gte('updated_at', new Date(Date.now() - 5 * 60 * 1000).toISOString());
+
+      if (!error && data) setBuses(data as BusWithDriver[]);
+    };
+
     const subscription = supabase
       .channel('bus_locations')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'bus_locations' }, () => {
-        fetchBuses();
-      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'bus_locations' }, fetchBuses)
       .subscribe();
 
     fetchBuses();
-    const interval = setInterval(fetchBuses, 5000);
 
     return () => {
       subscription.unsubscribe();
-      clearInterval(interval);
     };
-  }, [user, guestMode]);
+  }, [user, guestMode, language]);
 
   useEffect(() => {
     if (!isDriver || !profile?.bus_number || !user) return;
 
     const updateLocation = async () => {
-      if (location.latitude && location.longitude && !location.loading) {
-        const { data: existing } = await supabase
-          .from('bus_locations')
-          .select('id')
-          .eq('driver_id', user.id)
-          .maybeSingle();
+      if (!location.latitude || !location.longitude || location.loading) return;
 
-        const locationData = {
-          driver_id: user.id,
-          bus_number: profile.bus_number!,
-          latitude: location.latitude,
-          longitude: location.longitude,
-          speed: location.speed || 0,
-          heading: location.heading || 0,
-        };
+      const { data: existing } = await supabase
+        .from('bus_locations')
+        .select('id')
+        .eq('driver_id', user.id)
+        .maybeSingle();
 
-        if (existing) {
-          await supabase
-            .from('bus_locations')
-            .update(locationData)
-            .eq('id', existing.id);
-        } else {
-          await supabase
-            .from('bus_locations')
-            .insert(locationData);
-        }
+      const locationData = {
+        driver_id: user.id,
+        bus_number: profile.bus_number,
+        latitude: location.latitude,
+        longitude: location.longitude,
+        speed: location.speed || 0,
+        heading: location.heading || 0,
+      };
+
+      if (existing) {
+        await supabase.from('bus_locations').update(locationData).eq('id', existing.id);
+      } else {
+        await supabase.from('bus_locations').insert(locationData);
       }
     };
 
     updateLocation();
-    const interval = setInterval(updateLocation, 10000);
-
+    const interval = setInterval(updateLocation, 10_000);
     return () => clearInterval(interval);
   }, [isDriver, profile?.bus_number, user, location]);
-
-  const fetchBuses = async () => {
-    const { data, error } = await supabase
-      .from('bus_locations')
-      .select('*')
-      .gte('updated_at', new Date(Date.now() - 5 * 60 * 1000).toISOString());
-
-    if (!error && data) {
-      setBuses(data);
-    }
-  };
 
   const handleGuestMode = () => {
     setGuestMode(true);
@@ -144,91 +146,25 @@ function App() {
             </div>
           </div>
 
-          {!user && !guestMode && (
-            <div className="flex items-center space-x-2">
-              {/* Language Switcher for Guests */}
-              <div className="flex items-center space-x-1 bg-gray-100 dark:bg-gray-800 rounded-full px-2 py-1">
-                <button
-                  onClick={() => handleLanguageChange('ru')}
-                  className={`px-2 py-0.5 rounded-lg text-[10px] font-semibold transition-all ${
-                    language === 'ru'
-                      ? 'bg-gray-900 dark:bg-gray-700 text-white'
-                      : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200'
-                  }`}
-                >
-                  RU
-                </button>
-                <button
-                  onClick={() => handleLanguageChange('tj')}
-                  className={`px-2 py-0.5 rounded-lg text-[10px] font-semibold transition-all ${
-                    language === 'tj'
-                      ? 'bg-gray-900 dark:bg-gray-700 text-white'
-                      : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200'
-                  }`}
-                >
-                  TJ
-                </button>
-                <button
-                  onClick={() => handleLanguageChange('eng')}
-                  className={`px-2 py-0.5 rounded-lg text-[10px] font-semibold transition-all ${
-                    language === 'eng'
-                      ? 'bg-gray-900 dark:bg-gray-700 text-white'
-                      : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200'
-                  }`}
-                >
-                  ENG
-                </button>
-              </div>
-              
+          <div className="flex items-center space-x-2">
+            <div className="flex items-center space-x-1 bg-gray-100 dark:bg-gray-800 rounded-full px-2 py-1">
+              <button onClick={() => handleLanguageChange('ru')} className={`px-2 py-0.5 rounded-lg text-[10px] font-semibold ${language === 'ru' ? 'bg-gray-900 dark:bg-gray-700 text-white' : 'text-gray-600 dark:text-gray-400'}`}>RU</button>
+              <button onClick={() => handleLanguageChange('tj')} className={`px-2 py-0.5 rounded-lg text-[10px] font-semibold ${language === 'tj' ? 'bg-gray-900 dark:bg-gray-700 text-white' : 'text-gray-600 dark:text-gray-400'}`}>TJ</button>
+              <button onClick={() => handleLanguageChange('eng')} className={`px-2 py-0.5 rounded-lg text-[10px] font-semibold ${language === 'eng' ? 'bg-gray-900 dark:bg-gray-700 text-white' : 'text-gray-600 dark:text-gray-400'}`}>ENG</button>
+            </div>
+
+            {!user && !guestMode && (
               <button
                 onClick={() => setShowAuth(true)}
-                className="px-3 py-1.5 rounded-full text-xs font-semibold bg-gray-900 dark:bg-gray-700 text-white shadow-sm active:scale-95 transition-all hover:bg-gray-800 dark:hover:bg-gray-600"
+                className="px-3 py-1.5 rounded-full text-xs font-semibold bg-gray-900 dark:bg-gray-700 text-white shadow-sm"
               >
                 <span className="inline-flex items-center space-x-1">
                   <LogIn className="w-4 h-4" />
                   <span>{t('auth.login')}</span>
                 </span>
               </button>
-            </div>
-          )}
-          
-          {guestMode && (
-            <div className="flex items-center space-x-2">
-              {/* Language Switcher for Guest Mode */}
-              <div className="flex items-center space-x-1 bg-gray-100 dark:bg-gray-800 rounded-full px-2 py-1">
-                <button
-                  onClick={() => handleLanguageChange('ru')}
-                  className={`px-2 py-0.5 rounded-lg text-[10px] font-semibold transition-all ${
-                    language === 'ru'
-                      ? 'bg-gray-900 dark:bg-gray-700 text-white'
-                      : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200'
-                  }`}
-                >
-                  RU
-                </button>
-                <button
-                  onClick={() => handleLanguageChange('tj')}
-                  className={`px-2 py-0.5 rounded-lg text-[10px] font-semibold transition-all ${
-                    language === 'tj'
-                      ? 'bg-gray-900 dark:bg-gray-700 text-white'
-                      : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200'
-                  }`}
-                >
-                  TJ
-                </button>
-                <button
-                  onClick={() => handleLanguageChange('eng')}
-                  className={`px-2 py-0.5 rounded-lg text-[10px] font-semibold transition-all ${
-                    language === 'eng'
-                      ? 'bg-gray-900 dark:bg-gray-700 text-white'
-                      : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200'
-                  }`}
-                >
-                  ENG
-                </button>
-              </div>
-            </div>
-          )}
+            )}
+          </div>
         </div>
       </header>
 
@@ -238,11 +174,7 @@ function App() {
             <div className="h-full animate-fade-in">
               <MapView
                 buses={buses}
-                userLocation={
-                  location.latitude && location.longitude && !location.loading
-                    ? { lat: location.latitude, lng: location.longitude }
-                    : null
-                }
+                userLocation={location.latitude && location.longitude && !location.loading ? { lat: location.latitude, lng: location.longitude } : null}
                 onBusClick={setSelectedBus}
                 isDriver={isDriver}
                 driverBusNumber={profile?.bus_number || null}
@@ -255,11 +187,7 @@ function App() {
             <div className="h-full animate-fade-in">
               <ScheduleView
                 buses={buses}
-                userLocation={
-                  location.latitude && location.longitude && !location.loading
-                    ? { lat: location.latitude, lng: location.longitude }
-                    : null
-                }
+                userLocation={location.latitude && location.longitude && !location.loading ? { lat: location.latitude, lng: location.longitude } : null}
                 isDriver={isDriver}
                 driverBusNumber={profile?.bus_number || null}
               />
@@ -268,10 +196,7 @@ function App() {
 
           {activeTab === 'settings' && user && (
             <div className="h-full overflow-y-auto pb-20 animate-fade-in">
-              <Settings
-                onClose={() => undefined}
-                onOpenAdmin={() => setShowAdmin(true)}
-              />
+              <Settings onClose={() => undefined} onOpenAdmin={() => setShowAdmin(true)} />
             </div>
           )}
 
@@ -279,10 +204,7 @@ function App() {
             <div className="h-full flex items-center justify-center px-6 text-center text-sm text-gray-600 dark:text-gray-400 animate-fade-in">
               <div>
                 <p className="mb-4">{t('settings.title')}</p>
-                <button
-                  onClick={() => setShowAuth(true)}
-                  className="px-4 py-2 rounded-full bg-gray-900 dark:bg-gray-700 text-white font-semibold shadow-lg active:scale-95 transition-all hover:bg-gray-800 dark:hover:bg-gray-600"
-                >
+                <button onClick={() => setShowAuth(true)} className="px-4 py-2 rounded-full bg-gray-900 dark:bg-gray-700 text-white font-semibold">
                   {t('auth.login')}
                 </button>
               </div>
@@ -290,14 +212,14 @@ function App() {
           )}
 
           {isDriver && profile?.bus_number && activeTab === 'map' && (
-            <div className="absolute top-4 left-4 bg-white dark:bg-gray-800 rounded-2xl shadow-lg px-4 py-2 text-xs border border-gray-200 dark:border-gray-700 animate-fade-in">
+            <div className="absolute top-4 left-4 bg-white dark:bg-gray-800 rounded-2xl shadow-lg px-4 py-2 text-xs border border-gray-200 dark:border-gray-700">
               <p className="text-gray-600 dark:text-gray-400">{t('driver.youAreDriver')}</p>
               <p className="font-bold text-gray-900 dark:text-gray-100">{t('map.busNumber')}{profile.bus_number}</p>
             </div>
           )}
 
           {location.error && (
-            <div className="absolute top-4 right-4 bg-red-600 dark:bg-red-700 text-white rounded-2xl shadow-lg px-4 py-2 max-w-xs text-xs animate-slide-up border border-red-700 dark:border-red-800">
+            <div className="absolute top-4 right-4 bg-red-600 dark:bg-red-700 text-white rounded-2xl shadow-lg px-4 py-2 max-w-xs text-xs">
               <p>{location.error}</p>
             </div>
           )}
@@ -305,50 +227,24 @@ function App() {
           {selectedBus && activeTab === 'map' && (
             <BusInfo
               bus={selectedBus}
-              userLocation={
-                location.latitude && location.longitude
-                  ? { lat: location.latitude, lng: location.longitude }
-                  : null
-              }
+              userLocation={location.latitude && location.longitude ? { lat: location.latitude, lng: location.longitude } : null}
               onClose={() => setSelectedBus(null)}
             />
           )}
         </div>
       </main>
 
-      {/* Нижняя навигация под мобильный */}
       <nav className="h-16 bg-white dark:bg-gray-900 border-t border-gray-200 dark:border-gray-700 flex items-center justify-around px-2 sm:px-6 shadow-lg">
-        <button
-          onClick={() => setActiveTab('map')}
-          className={`flex flex-col items-center justify-center flex-1 mx-1 rounded-2xl py-2 text-xs font-medium transition-all duration-300 ${
-            activeTab === 'map'
-              ? 'bg-gray-900 dark:bg-gray-700 text-white shadow-lg scale-105'
-              : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
-          }`}
-        >
-          <Map className={`w-5 h-5 mb-0.5 transition-transform ${activeTab === 'map' ? 'scale-110' : ''}`} />
+        <button onClick={() => setActiveTab('map')} className={`flex flex-col items-center justify-center flex-1 mx-1 rounded-2xl py-2 text-xs font-medium ${activeTab === 'map' ? 'bg-gray-900 dark:bg-gray-700 text-white' : 'text-gray-600 dark:text-gray-400'}`}>
+          <Map className="w-5 h-5 mb-0.5" />
           <span className="font-semibold">{t('nav.map')}</span>
         </button>
-        <button
-          onClick={() => setActiveTab('schedule')}
-          className={`flex flex-col items-center justify-center flex-1 mx-1 rounded-2xl py-2 text-xs font-medium transition-all duration-300 ${
-            activeTab === 'schedule'
-              ? 'bg-gray-900 dark:bg-gray-700 text-white shadow-lg scale-105'
-              : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
-          }`}
-        >
-          <Clock4 className={`w-5 h-5 mb-0.5 transition-transform ${activeTab === 'schedule' ? 'scale-110' : ''}`} />
+        <button onClick={() => setActiveTab('schedule')} className={`flex flex-col items-center justify-center flex-1 mx-1 rounded-2xl py-2 text-xs font-medium ${activeTab === 'schedule' ? 'bg-gray-900 dark:bg-gray-700 text-white' : 'text-gray-600 dark:text-gray-400'}`}>
+          <Clock4 className="w-5 h-5 mb-0.5" />
           <span className="font-semibold">{t('nav.schedule')}</span>
         </button>
-        <button
-          onClick={() => setActiveTab('settings')}
-          className={`flex flex-col items-center justify-center flex-1 mx-1 rounded-2xl py-2 text-xs font-medium transition-all duration-300 ${
-            activeTab === 'settings'
-              ? 'bg-gray-900 dark:bg-gray-700 text-white shadow-lg scale-105'
-              : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
-          }`}
-        >
-          <SettingsIcon className={`w-5 h-5 mb-0.5 transition-transform ${activeTab === 'settings' ? 'scale-110' : ''}`} />
+        <button onClick={() => setActiveTab('settings')} className={`flex flex-col items-center justify-center flex-1 mx-1 rounded-2xl py-2 text-xs font-medium ${activeTab === 'settings' ? 'bg-gray-900 dark:bg-gray-700 text-white' : 'text-gray-600 dark:text-gray-400'}`}>
+          <SettingsIcon className="w-5 h-5 mb-0.5" />
           <span className="font-semibold">{t('nav.settings')}</span>
         </button>
       </nav>

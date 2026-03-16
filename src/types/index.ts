@@ -35,6 +35,10 @@ export interface BusWithDriver extends BusLocation {
 export interface Stop {
   id: string;
   name: string;
+  name_ru?: string | null;
+  name_tj?: string | null;
+  name_eng?: string | null;
+  busmaps_stop_id?: string | null;
   latitude: number;
   longitude: number;
   created_at: string;
@@ -56,6 +60,9 @@ export interface Route {
   driver_id: string;
   name: string;
   is_active: boolean;
+  source?: 'manual' | 'busmaps';
+  external_id?: string | null;
+  locked?: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -106,4 +113,15 @@ export interface BusFeedback {
   complaint: string | null;
   created_at: string;
   user?: Profile;
+}
+
+export interface BusCatalog {
+  id: string;
+  bus_number: string;
+  route_name: string | null;
+  route_external_id: string | null;
+  source: 'busmaps' | 'manual';
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
 }

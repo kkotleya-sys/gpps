@@ -11,8 +11,11 @@ interface BusInfoProps {
 export function BusInfo({ bus, userLocation, onClose }: BusInfoProps) {
   const { profile } = useAuth();
   const isDriver = profile?.bus_number === bus.bus_number;
+  void userLocation;
 
   return (
     <BusProfile bus={bus} onClose={onClose} isDriver={isDriver} />
   );
 }
+
+

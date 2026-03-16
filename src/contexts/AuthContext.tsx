@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useState, ReactNode } from 'react
 import { User } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabase';
 import { Profile, UserRole } from '../types';
+import { fetchDushanbeRouteCatalog } from '../lib/busmaps';
 
 interface AuthContextType {
   user: User | null;
@@ -100,6 +101,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const updateProfile = async (updates: Partial<Profile>) => {
     if (!user) throw new Error('No user logged in');
+
+    if (typeof updates.bus_number === 'string' && updates.bus_number.trim()) {
+      const busNumber = updates.bus_number.trim();
+      const { data: route, error: routeError } = await supabase
+        .from('routes')
+        .select('bus_number')
+        .eq('bus_number', busNumber)
+        .maybeSingle();
+
+      if (!routeError && !route) {
+        const busMapsRoutes = await fetchDushanbeRouteCatalog('ru').catch(() => []);
+        const existsInBusMaps = busMapsRoutes.some((item) => item.bus_number === busNumber);
+
+        if (!existsInBusMaps) {
+          throw new Error('Выберите автобус из доступного списка маршрутов.');
+        }
+      }
+    }
 
     const { error } = await supabase
       .from('profiles')

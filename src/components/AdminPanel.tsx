@@ -1,95 +1,38 @@
-﻿import { useState, useEffect, useRef } from 'react';
+﻿import { useEffect, useState } from 'react';
 import { X, Users, Search, Edit2, Trash2, DownloadCloud } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { Profile, UserRole } from '../types';
-import { fetchAllDushanbeStopsFromMapbox, hasMapboxToken } from '../lib/stopsParser';
-import { loadMapbox } from '../lib/mapboxLoader';
+import { useLanguage } from '../contexts/LanguageContext';
+import { syncBusMapsDushanbe } from '../lib/busmapsSync';
 
 interface AdminPanelProps {
   onClose: () => void;
 }
 
 export function AdminPanel({ onClose }: AdminPanelProps) {
+  const { language } = useLanguage();
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [loading, setLoading] = useState(true);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editRole, setEditRole] = useState<UserRole>(UserRole.USER);
-  const [importingStops, setImportingStops] = useState(false);
-  const [importProgress, setImportProgress] = useState(0);
-  const [importedStops, setImportedStops] = useState(0);
-  const [skippedStops, setSkippedStops] = useState(0);
+
+  const [importing, setImporting] = useState(false);
+  const [replaceExisting, setReplaceExisting] = useState(true);
+  const [importProgress, setImportProgress] = useState('');
+  const [importStats, setImportStats] = useState<{
+    stops: number;
+    routes: number;
+    buses: number;
+    schedules: number;
+    routeStops: number;
+    legacyMode: boolean;
+  } | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
-  const [showAddStopModal, setShowAddStopModal] = useState(false);
-  const [newStopName, setNewStopName] = useState('');
-  const [newStopLat, setNewStopLat] = useState<number | null>(null);
-  const [newStopLng, setNewStopLng] = useState<number | null>(null);
-  const mapContainerRef = useRef<HTMLDivElement>(null);
-  const mapInstanceRef = useRef<any>(null);
-  const markerRef = useRef<any>(null);
 
   useEffect(() => {
     fetchProfiles();
   }, []);
-
-  useEffect(() => {
-    if (!showAddStopModal || !mapContainerRef.current) return;
-    let cancelled = false;
-
-    loadMapbox()
-      .then((mapboxgl) => {
-        if (cancelled || mapInstanceRef.current || !mapContainerRef.current) return;
-        const map = new mapboxgl.Map({
-          container: mapContainerRef.current,
-          style: 'mapbox://styles/mapbox/streets-v12',
-          center: [68.7738, 38.5598],
-          zoom: 13,
-        });
-        mapInstanceRef.current = map;
-
-        const clickHandler = (e: any) => {
-          const { lng, lat } = e.lngLat;
-          setNewStopLat(lat);
-          setNewStopLng(lng);
-
-          if (markerRef.current) {
-            markerRef.current.setLngLat([lng, lat]);
-          } else {
-            markerRef.current = new mapboxgl.Marker()
-              .setLngLat([lng, lat])
-              .addTo(map);
-          }
-        };
-        map.on('click', clickHandler);
-        (map as any)._adminClickHandler = clickHandler;
-      })
-      .catch((e) => {
-        console.error('Mapbox loader error:', e);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [showAddStopModal]);
-
-  useEffect(() => {
-    if (showAddStopModal) return;
-    if (mapInstanceRef.current) {
-      const map = mapInstanceRef.current;
-      if ((map as any)._adminClickHandler) {
-        map.off('click', (map as any)._adminClickHandler);
-      }
-      map.remove();
-      mapInstanceRef.current = null;
-    }
-    if (markerRef.current) {
-      markerRef.current.remove();
-      markerRef.current = null;
-    }
-    if (mapContainerRef.current) {
-      mapContainerRef.current.innerHTML = '';
-    }
-  }, [showAddStopModal]);
 
   const fetchProfiles = async () => {
     setLoading(true);
@@ -98,114 +41,54 @@ export function AdminPanel({ onClose }: AdminPanelProps) {
       .select('*')
       .order('created_at', { ascending: false });
 
-    if (!error && data) {
-      setProfiles(data);
-    }
+    if (!error && data) setProfiles(data);
     setLoading(false);
   };
 
   const updateUserRole = async (userId: string, newRole: UserRole) => {
-    const { error } = await supabase
-      .from('profiles')
-      .update({ role: newRole })
-      .eq('id', userId);
-
+    const { error } = await supabase.from('profiles').update({ role: newRole }).eq('id', userId);
     if (!error) {
-      setProfiles(profiles.map(p => p.id === userId ? { ...p, role: newRole } : p));
+      setProfiles((prev) => prev.map((p) => (p.id === userId ? { ...p, role: newRole } : p)));
       setEditingId(null);
     }
   };
 
   const deleteUser = async (userId: string) => {
     if (!confirm('Вы уверены, что хотите удалить этого пользователя?')) return;
-
-    const { error } = await supabase
-      .from('profiles')
-      .delete()
-      .eq('id', userId);
-
-    if (!error) {
-      setProfiles(profiles.filter(p => p.id !== userId));
-    }
+    const { error } = await supabase.from('profiles').delete().eq('id', userId);
+    if (!error) setProfiles((prev) => prev.filter((p) => p.id !== userId));
   };
 
-  const handleImportStops = async () => {
-    if (!hasMapboxToken()) {
-      alert('Добавьте VITE_MAPBOX_TOKEN в переменные окружения.');
-      return;
-    }
-    setImportingStops(true);
-    setImportProgress(0);
-    setImportedStops(0);
-    setSkippedStops(0);
+  const handleImportFromBusMaps = async () => {
+    setImporting(true);
     setImportError(null);
+    setImportStats(null);
+    setImportProgress('Запуск синхронизации...');
 
     try {
-      const stopsFromMapbox = await fetchAllDushanbeStopsFromMapbox();
-      if (stopsFromMapbox.length <= 1 && stopsFromMapbox[0]?.name?.includes('Автовокзал')) {
-        throw new Error('Mapbox API вернуло слишком мало данных. Проверьте токен и лимиты.');
-      }
-      const { data: existingStops } = await supabase
-        .from('stops')
-        .select('name, latitude, longitude');
-
-      const existingKey = new Set(
-        (existingStops || []).map((s) => `${s.name}|${s.latitude.toFixed(6)}|${s.longitude.toFixed(6)}`)
-      );
-
-      const toInsert = stopsFromMapbox.filter((s) => {
-        const key = `${s.name}|${s.latitude.toFixed(6)}|${s.longitude.toFixed(6)}`;
-        if (existingKey.has(key)) return false;
-        existingKey.add(key);
-        return true;
+      const result = await syncBusMapsDushanbe({
+        language,
+        replaceExisting,
+        onProgress: (p) => {
+          setImportProgress(`${p.stage}: ${p.completed}/${p.total}`);
+        },
       });
 
-      const batchSize = 200;
-      let inserted = 0;
-      for (let i = 0; i < toInsert.length; i += batchSize) {
-        const batch = toInsert.slice(i, i + batchSize).map((s) => ({
-          name: s.name,
-          latitude: s.latitude,
-          longitude: s.longitude,
-        }));
-        const { error } = await supabase.from('stops').insert(batch);
-        if (error) {
-          console.error('Import error:', error);
-          throw error;
-        }
-        inserted += batch.length;
-        setImportedStops(inserted);
-        setImportProgress(Math.round((inserted / toInsert.length) * 100));
-      }
-
-      setSkippedStops(stopsFromMapbox.length - toInsert.length);
+      setImportStats({
+        stops: result.stopsImported,
+        routes: result.routesImported,
+        buses: result.busesImported,
+        schedules: result.schedulesImported,
+        routeStops: result.routeStopsImported,
+        legacyMode: result.legacyMode,
+      });
+      setImportProgress('Синхронизация завершена');
     } catch (error: any) {
-      console.error('Import stops failed:', error);
-      setImportError(error?.message || 'Ошибка импорта');
+      setImportError(error?.message || 'Ошибка синхронизации с BusMaps');
+      setImportProgress('');
     } finally {
-      setImportingStops(false);
+      setImporting(false);
     }
-  };
-
-  const handleSaveManualStop = async () => {
-    if (!newStopName.trim() || newStopLat === null || newStopLng === null) {
-      alert('Введите название и выберите точку на карте.');
-      return;
-    }
-    const { error } = await supabase.from('stops').insert({
-      name: newStopName.trim(),
-      latitude: newStopLat,
-      longitude: newStopLng,
-    });
-    if (error) {
-      console.error('Manual stop insert error:', error);
-      alert('Ошибка при добавлении остановки');
-      return;
-    }
-    setNewStopName('');
-    setNewStopLat(null);
-    setNewStopLng(null);
-    setShowAddStopModal(false);
   };
 
   const getRoleName = (role: UserRole) => {
@@ -238,7 +121,7 @@ export function AdminPanel({ onClose }: AdminPanelProps) {
     }
   };
 
-  const filteredProfiles = profiles.filter(p =>
+  const filteredProfiles = profiles.filter((p) =>
     p.email.toLowerCase().includes(searchTerm.toLowerCase()) ||
     p.first_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
     p.last_name.toLowerCase().includes(searchTerm.toLowerCase())
@@ -254,7 +137,7 @@ export function AdminPanel({ onClose }: AdminPanelProps) {
             </div>
             <div>
               <h2 className="text-2xl font-bold">Админ панель</h2>
-              <p className="text-gray-400 text-sm">Управление пользователями</p>
+              <p className="text-gray-400 text-sm">Пользователи и синхронизация BusMaps</p>
             </div>
           </div>
           <button
@@ -266,6 +149,50 @@ export function AdminPanel({ onClose }: AdminPanelProps) {
         </div>
 
         <div className="p-6 space-y-4 flex-1 overflow-y-auto bg-gray-50 dark:bg-gray-900">
+          <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-2xl p-4 flex flex-col gap-3">
+            <div>
+              <p className="text-sm font-semibold text-gray-900 dark:text-gray-50">
+                Синхронизация Душанбе из BusMaps
+              </p>
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                Загружает официальные остановки, маршруты, автобусы и расписания. При полной замене старые остановки/маршруты будут очищены.
+              </p>
+            </div>
+
+            <label className="inline-flex items-center gap-2 text-xs text-gray-700 dark:text-gray-300">
+              <input
+                type="checkbox"
+                checked={replaceExisting}
+                onChange={(e) => setReplaceExisting(e.target.checked)}
+              />
+              Полностью заменить старые данные
+            </label>
+
+            {importProgress && (
+              <p className="text-xs text-gray-600 dark:text-gray-400">{importProgress}</p>
+            )}
+
+            {importStats && (
+              <p className="text-xs text-emerald-600 dark:text-emerald-400">
+                Импортировано: остановок {importStats.stops}, маршрутов {importStats.routes}, автобусов {importStats.buses}, записей расписания {importStats.schedules}, остановок маршрутов {importStats.routeStops}
+                {importStats.legacyMode ? ' (legacy schema)' : ''}
+              </p>
+            )}
+
+            {importError && <p className="text-xs text-red-500">{importError}</p>}
+
+            <div>
+              <button
+                onClick={handleImportFromBusMaps}
+                disabled={importing}
+                className="px-4 py-2 bg-gray-900 dark:bg-gray-700 text-white rounded-xl text-sm font-semibold flex items-center gap-2 hover:bg-gray-800 dark:hover:bg-gray-600 disabled:opacity-50"
+              >
+                <DownloadCloud className="w-4 h-4" />
+                {importing ? 'Синхронизация...' : 'Синхронизировать'}
+              </button>
+            </div>
+          </div>
+
           <div className="relative">
             <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 text-gray-400 dark:text-gray-500 w-5 h-5" />
             <input
@@ -277,60 +204,9 @@ export function AdminPanel({ onClose }: AdminPanelProps) {
             />
           </div>
 
-          <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-            <div>
-              <p className="text-sm font-semibold text-gray-900 dark:text-gray-50">
-                Импорт остановок из Mapbox
-              </p>
-              <p className="text-xs text-gray-500 dark:text-gray-400">
-                Загрузит остановки Душанбе и добавит в Supabase (без дублей).
-              </p>
-              {(importedStops > 0 || skippedStops > 0) && (
-                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                  Добавлено: {importedStops}, пропущено: {skippedStops}
-                </p>
-              )}
-              {importError && (
-                <p className="text-xs text-red-500 mt-1">{importError}</p>
-              )}
-            </div>
-            <div className="flex items-center gap-3">
-              {importingStops && (
-                <span className="text-xs text-gray-500 dark:text-gray-400">
-                  {importProgress}%
-                </span>
-              )}
-              <button
-                onClick={handleImportStops}
-                disabled={importingStops}
-                className="px-4 py-2 bg-gray-900 dark:bg-gray-700 text-white rounded-xl text-sm font-semibold flex items-center gap-2 hover:bg-gray-800 dark:hover:bg-gray-600 disabled:opacity-50"
-              >
-                <DownloadCloud className="w-4 h-4" />
-                {importingStops ? 'Импорт...' : 'Импортировать'}
-              </button>
-            </div>
-          </div>
-
-          <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-            <div>
-              <p className="text-sm font-semibold text-gray-900 dark:text-gray-50">
-                Добавить остановку вручную
-              </p>
-              <p className="text-xs text-gray-500 dark:text-gray-400">
-                Нажмите на карту, задайте имя и сохраните.
-              </p>
-            </div>
-            <button
-              onClick={() => setShowAddStopModal(true)}
-              className="px-4 py-2 bg-gray-900 dark:bg-gray-700 text-white rounded-xl text-sm font-semibold hover:bg-gray-800 dark:hover:bg-gray-600"
-            >
-              Открыть карту
-            </button>
-          </div>
-
           {loading ? (
             <div className="text-center py-12">
-              <div className="animate-spin rounded-full h-12 w-12 border-b-4 border-gray-900 dark:border-gray-100 mx-auto"></div>
+              <div className="animate-spin rounded-full h-12 w-12 border-b-4 border-gray-900 dark:border-gray-100 mx-auto" />
               <p className="text-gray-600 dark:text-gray-400 mt-4">Загрузка...</p>
             </div>
           ) : (
@@ -344,11 +220,7 @@ export function AdminPanel({ onClose }: AdminPanelProps) {
                     <div className="flex-1 flex items-center space-x-4">
                       <div className="w-12 h-12 rounded-full bg-gradient-to-br from-gray-700 to-gray-900 dark:from-gray-600 dark:to-gray-800 flex items-center justify-center text-white text-lg font-bold overflow-hidden border-2 border-gray-200 dark:border-gray-700">
                         {profile.avatar_url ? (
-                          <img
-                            src={profile.avatar_url}
-                            alt="Avatar"
-                            className="w-full h-full object-cover"
-                          />
+                          <img src={profile.avatar_url} alt="Avatar" className="w-full h-full object-cover" />
                         ) : (
                           `${profile.first_name?.[0] || ''}${profile.last_name?.[0] || ''}`.toUpperCase() || 'U'
                         )}
@@ -364,9 +236,7 @@ export function AdminPanel({ onClose }: AdminPanelProps) {
                         </div>
                         <p className="text-sm text-gray-600 dark:text-gray-400">{profile.email}</p>
                         {profile.bus_number && (
-                          <p className="text-sm text-gray-500 dark:text-gray-500 mt-1">
-                            Автобус №{profile.bus_number}
-                          </p>
+                          <p className="text-sm text-gray-500 dark:text-gray-500 mt-1">Автобус №{profile.bus_number}</p>
                         )}
                       </div>
                     </div>
@@ -421,13 +291,6 @@ export function AdminPanel({ onClose }: AdminPanelProps) {
               ))}
             </div>
           )}
-
-          {!loading && filteredProfiles.length === 0 && (
-            <div className="text-center py-12">
-              <Users className="w-16 h-16 text-gray-300 dark:text-gray-600 mx-auto mb-4" />
-              <p className="text-gray-600 dark:text-gray-400">Пользователи не найдены</p>
-            </div>
-          )}
         </div>
 
         <div className="bg-gray-100 dark:bg-gray-800 p-4 border-t border-gray-200 dark:border-gray-700">
@@ -442,50 +305,7 @@ export function AdminPanel({ onClose }: AdminPanelProps) {
           </div>
         </div>
       </div>
-
-      {showAddStopModal && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-white dark:bg-gray-900 rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden">
-            <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
-              <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-50">
-                Добавить остановку
-              </h3>
-              <button
-                onClick={() => setShowAddStopModal(false)}
-                className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
-              >
-                <X className="w-6 h-6" />
-              </button>
-            </div>
-            <div className="p-4 space-y-3">
-              <input
-                type="text"
-                value={newStopName}
-                onChange={(e) => setNewStopName(e.target.value)}
-                placeholder="Название остановки"
-                className="w-full px-4 py-2.5 rounded-2xl border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-800 text-gray-900 dark:text-gray-50"
-              />
-              <div className="h-96 rounded-2xl overflow-hidden border border-gray-200 dark:border-gray-700">
-                <div ref={mapContainerRef} className="w-full h-full" />
-              </div>
-              <div className="flex items-center justify-end gap-2">
-                <button
-                  onClick={() => setShowAddStopModal(false)}
-                  className="px-4 py-2 rounded-xl bg-gray-200 dark:bg-gray-700 text-gray-900 dark:text-gray-50 font-semibold"
-                >
-                  Отмена
-                </button>
-                <button
-                  onClick={handleSaveManualStop}
-                  className="px-4 py-2 rounded-xl bg-gray-900 dark:bg-gray-700 text-white font-semibold"
-                >
-                  Сохранить
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
+
