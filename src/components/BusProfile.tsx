@@ -1,5 +1,6 @@
 ﻿import { useState, useEffect, useRef } from 'react';
-import { X, Star, Camera, Video, Edit2, Save, Bell } from 'lucide-react';
+import { X, Star, Camera, Video, Edit2, Save, Bell, Info } from 'lucide-react';
+import { useMemo } from 'react';
 import * as THREE from 'three';
 import { BusWithDriver, BusProfile as BusProfileType, BusMedia, Review, Route, RouteStop, Stop, Profile } from '../types';
 import { supabase } from '../lib/supabase';
@@ -7,14 +8,16 @@ import { useLanguage } from '../contexts/LanguageContext';
 import { useAuth } from '../contexts/AuthContext';
 import { StopSelector } from './StopSelector';
 import { ensureNotificationPermission, loadNotificationPrefs, saveNotificationPrefs } from '../lib/notifications';
+import { fetchBusRouteVariants, fetchWikiroutesRouteDetails, WikiroutesRouteDetails } from '../lib/busmaps';
 
 interface BusProfileProps {
   bus: BusWithDriver;
   onClose: () => void;
   isDriver?: boolean;
+  driverRouteId?: string | null;
 }
 
-export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
+export function BusProfile({ bus, onClose, isDriver, driverRouteId }: BusProfileProps) {
   const { t } = useLanguage();
   const { user } = useAuth();
   const [busProfile, setBusProfile] = useState<BusProfileType | null>(null);
@@ -38,6 +41,9 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
   const [notifBusId, setNotifBusId] = useState(false);
   const [notifBusNumber, setNotifBusNumber] = useState(false);
   const [notifStops, setNotifStops] = useState<Stop[]>([]);
+  const [routeDetails, setRouteDetails] = useState<WikiroutesRouteDetails | null>(null);
+  const [routeDetailsOpen, setRouteDetailsOpen] = useState(false);
+  const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -160,9 +166,42 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
   }, [busProfile, bus.driver_id]);
 
   useEffect(() => {
+    let cancelled = false;
+
+    const loadRouteDetails = async () => {
+      try {
+        const variants = await fetchBusRouteVariants(bus.bus_number, 'ru');
+        const preferredVariant = variants[0];
+        if (!preferredVariant) return;
+
+        const details = await fetchWikiroutesRouteDetails(preferredVariant.route_id);
+        if (!cancelled) setRouteDetails(details);
+      } catch {
+        if (!cancelled) setRouteDetails(null);
+      }
+    };
+
+    loadRouteDetails();
+    return () => {
+      cancelled = true;
+    };
+  }, [bus.bus_number]);
+
+  useEffect(() => {
     const prefs = loadNotificationPrefs();
     setNotifStops(stops.filter((s) => prefs.stopIds.includes(s.id)));
   }, [stops]);
+
+  useEffect(() => {
+    const preferredRouteId =
+      (driverRouteId && routes.find((route) => route.id === driverRouteId)?.id) ||
+      routes.find((route) => route.is_active)?.id ||
+      routes[0]?.id ||
+      null;
+
+    if (selectedRouteId && routes.some((route) => route.id === selectedRouteId)) return;
+    setSelectedRouteId(preferredRouteId);
+  }, [routes, driverRouteId, selectedRouteId]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -370,8 +409,7 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
     const { data } = await supabase
       .from('routes')
       .select('*')
-      .eq('bus_number', bus.bus_number)
-      .eq('is_active', true);
+      .eq('bus_number', bus.bus_number);
     if (data) setRoutes(data as Route[]);
   };
 
@@ -612,14 +650,41 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
     return review.rating === reviewFilter;
   });
 
-  const activeRoute = routes.find((r) => r.is_active);
+  const activeRoute =
+    routes.find((route) => route.id === selectedRouteId) ||
+    routes.find((route) => route.id === driverRouteId) ||
+    routes.find((route) => route.is_active) ||
+    routes[0];
   const activeRouteStops = activeRoute
     ? routeStops
-        .filter((rs) => rs.route_id === activeRoute.id)
+        .filter((routeStop) => routeStop.route_id === activeRoute.id)
         .sort((a, b) => a.order_index - b.order_index)
-        .map((rs) => stops.find((s) => s.id === rs.stop_id))
-        .filter((s): s is Stop => !!s)
+        .map((routeStop) => ({
+          routeStop,
+          stop: stops.find((stop) => stop.id === routeStop.stop_id) || null,
+        }))
+        .filter((item): item is { routeStop: RouteStop; stop: Stop } => !!item.stop)
     : [];
+  const routeSummaries = useMemo(
+    () =>
+      routes.map((route) => {
+        const orderedStops = routeStops
+          .filter((routeStop) => routeStop.route_id === route.id)
+          .sort((a, b) => a.order_index - b.order_index)
+          .map((routeStop) => stops.find((stop) => stop.id === routeStop.stop_id) || null)
+          .filter((stop): stop is Stop => !!stop);
+
+        return {
+          route,
+          stopsCount: orderedStops.length,
+          title:
+            orderedStops.length >= 2
+              ? `${orderedStops[0].name} -> ${orderedStops[orderedStops.length - 1].name}`
+              : route.name,
+        };
+      }),
+    [routes, routeStops, stops]
+  );
 
   const userReview = reviews.find((r) => r.user_id === user?.id);
   const avgRating =
@@ -646,7 +711,31 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
             ref={containerRef}
             className="bg-white dark:bg-gray-800 rounded-2xl h-80 overflow-hidden relative"
             style={{ touchAction: 'none' }}
-          />
+          >
+            <button
+              type="button"
+              onClick={() => setRouteDetailsOpen((value) => !value)}
+              className="absolute top-3 right-3 z-10 w-9 h-9 rounded-full bg-white/95 dark:bg-gray-900/95 border border-gray-200 dark:border-gray-700 flex items-center justify-center text-gray-700 dark:text-gray-200 shadow-sm"
+            >
+              <Info className="w-4 h-4" />
+            </button>
+            {routeDetailsOpen && (
+              <div className="absolute top-14 right-3 z-10 max-w-[240px] rounded-2xl border border-gray-200 dark:border-gray-700 bg-white/95 dark:bg-gray-900/95 p-3 text-xs shadow-lg">
+                <p className="font-semibold text-gray-900 dark:text-gray-50 mb-2">Стоимость проезда</p>
+                <p className="text-gray-600 dark:text-gray-300">
+                  Цена: <span className="font-semibold text-gray-900 dark:text-gray-50">{routeDetails?.fare || 'Нет данных'}</span>
+                </p>
+                {routeDetails?.cardFare && (
+                  <p className="mt-1 text-gray-600 dark:text-gray-300">
+                    По карте: <span className="font-semibold text-gray-900 dark:text-gray-50">{routeDetails.cardFare}</span>
+                  </p>
+                )}
+                {routeDetails?.operator && (
+                  <p className="mt-1 text-gray-500 dark:text-gray-400">{routeDetails.operator}</p>
+                )}
+              </div>
+            )}
+          </div>
 
           <div className="flex items-center justify-between">
             <div>
@@ -773,32 +862,52 @@ export function BusProfile({ bus, onClose, isDriver }: BusProfileProps) {
             </div>
           )}
 
+          {routeSummaries.length > 0 && (
+            <div className="bg-gray-50 dark:bg-gray-800 rounded-2xl p-4">
+              <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-50 mb-3">
+                Рейсы автобуса
+              </h3>
+              <div className="space-y-2">
+                {routeSummaries.map((item) => (
+                  <button
+                    key={item.route.id}
+                    type="button"
+                    onClick={() => setSelectedRouteId(item.route.id)}
+                    className={`w-full text-left rounded-xl border px-3 py-2 ${
+                      activeRoute?.id === item.route.id
+                        ? 'border-gray-900 dark:border-gray-200 bg-white dark:bg-gray-700'
+                        : 'border-gray-200 dark:border-gray-700 bg-white/70 dark:bg-gray-700/40'
+                    }`}
+                  >
+                    <p className="text-sm font-semibold text-gray-900 dark:text-gray-50">{item.title}</p>
+                    <p className="text-xs text-gray-500 dark:text-gray-400">{item.stopsCount} остановок</p>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {activeRoute && activeRouteStops.length > 0 && (
             <div className="bg-gray-50 dark:bg-gray-800 rounded-2xl p-4">
               <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-50 mb-2">
-                {activeRoute.name}
+                {routeSummaries.find((item) => item.route.id === activeRoute.id)?.title || activeRoute.name}
               </h3>
               <div className="space-y-1">
-                {activeRouteStops.map((stop, index) => {
-                  const routeStop = routeStops.find(
-                    (rs) => rs.route_id === activeRoute.id && rs.stop_id === stop.id
-                  );
-                  return (
-                    <div
-                      key={stop.id}
-                      className="flex items-center justify-between px-3 py-2 bg-white dark:bg-gray-700 rounded-xl"
-                    >
-                      <span className="text-sm text-gray-900 dark:text-gray-50">
-                        {index + 1}. {stop.name}
+                {activeRouteStops.map(({ stop, routeStop }, index) => (
+                  <div
+                    key={stop.id}
+                    className="flex items-center justify-between px-3 py-2 bg-white dark:bg-gray-700 rounded-xl"
+                  >
+                    <span className="text-sm text-gray-900 dark:text-gray-50">
+                      {index + 1}. {stop.name}
+                    </span>
+                    {routeStop.arrival_time && (
+                      <span className="text-xs text-gray-500 dark:text-gray-400">
+                        {routeStop.arrival_time}
                       </span>
-                      {routeStop?.arrival_time && (
-                        <span className="text-xs text-gray-500 dark:text-gray-400">
-                          {routeStop.arrival_time}
-                        </span>
-                      )}
-                    </div>
-                  );
-                })}
+                    )}
+                  </div>
+                ))}
               </div>
             </div>
           )}

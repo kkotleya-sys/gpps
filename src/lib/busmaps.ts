@@ -7,6 +7,7 @@ const BUSMAPS_PROXY_BASE = (import.meta as any).env?.VITE_BUSMAPS_PROXY_BASE || 
 const BUSMAPS_HOST = (import.meta as any).env?.VITE_BUSMAPS_HOST || 'wikiroutes.info';
 const BUSMAPS_API_KEY = (import.meta as any).env?.VITE_BUSMAPS_API_KEY as string | undefined;
 const USE_PROXY = Boolean((import.meta as any).env?.DEV);
+const WIKIROUTES_PROXY_BASE = (import.meta as any).env?.VITE_WIKIROUTES_PROXY_BASE || '/api/wikiroutes';
 
 export interface BusMapsRouteRef {
   routeId: string;
@@ -43,6 +44,21 @@ export interface BusMapsCatalogRoute {
   route_external_id: string | null;
 }
 
+export interface BusMapsRouteVariant {
+  route_id: string;
+  bus_number: string;
+  route_name: string | null;
+  trip_headsign: string | null;
+}
+
+export interface WikiroutesRouteDetails {
+  routeId: string;
+  fare: string | null;
+  cardFare: string | null;
+  operator: string | null;
+  updatedAt: string | null;
+}
+
 export interface BusMapsTransitSection {
   type: 'pedestrian' | 'transit';
   fromStopId: string | null;
@@ -66,6 +82,41 @@ export interface BusMapsPlannedRoute {
   durationSeconds: number;
   transfers: number;
   sections: BusMapsTransitSection[];
+}
+
+function isBusTransportType(value: string | null | undefined): boolean {
+  if (!value) return false;
+
+  const normalized = value.trim().toLowerCase();
+  const numeric = Number(normalized);
+
+  if (Number.isFinite(numeric)) {
+    if (numeric === 3) return true;
+    if (numeric >= 700 && numeric < 800) return true;
+    return false;
+  }
+
+  const denyTokens = [
+    'tram',
+    'трам',
+    'trolley',
+    'трол',
+    'train',
+    'rail',
+    'metro',
+    'subway',
+    'электр',
+    'marshrut',
+    'маршрут',
+    'minibus',
+    'shuttle',
+    'shared_taxi',
+    'taxi',
+  ];
+
+  if (denyTokens.some((token) => normalized.includes(token))) return false;
+
+  return normalized.includes('bus') || normalized.includes('автобус');
 }
 
 function toApiLang(language: Language): string {
@@ -156,12 +207,15 @@ function normalizeRouteRef(raw: any): BusMapsRouteRef | null {
   const routeShortName = pickFirstString(raw, ['routeShortName', 'shortName', 'routeNumber']) || '';
   if (!routeId || !routeShortName) return null;
 
+  const routeType = pickFirstString(raw, ['routeType', 'type']) || null;
+  if (!isBusTransportType(routeType)) return null;
+
   return {
     routeId,
     routeShortName,
     routeLongName: pickFirstString(raw, ['routeLongName', 'longName', 'name']) || null,
     tripHeadsign: pickFirstString(raw, ['tripHeadsign', 'headsign']) || null,
-    routeType: pickFirstString(raw, ['routeType', 'type']) || null,
+    routeType,
   };
 }
 
@@ -193,6 +247,10 @@ function normalizeStop(raw: any, regionName?: string | null): BusMapsStop | null
 }
 
 function normalizeVehicle(raw: any): BusWithDriver | null {
+  const transportType =
+    pickFirstString(raw, ['routeType', 'type', 'vehicleType', 'transportType', 'mode']) || null;
+  if (transportType && !isBusTransportType(transportType)) return null;
+
   const busNumber = pickFirstString(raw, ['routeShortName', 'routeNumber', 'busNumber', 'number']) || '';
   const lat = pickFirstNumber(raw, ['lat', 'latitude', 'y']);
   const lon = pickFirstNumber(raw, ['lon', 'lng', 'longitude', 'x']);
@@ -328,6 +386,81 @@ export async function fetchDushanbeRouteCatalog(language: Language): Promise<Bus
   });
 
   return Array.from(uniqueRoutes.values()).sort((a, b) => a.bus_number.localeCompare(b.bus_number, 'ru'));
+}
+
+export async function fetchBusRouteVariants(busNumber: string, language: Language): Promise<BusMapsRouteVariant[]> {
+  const { stops } = await fetchStopsInRadius({
+    lat: 38.5598,
+    lon: 68.787,
+    radiusMeters: 20000,
+    limit: 5000,
+    language,
+  });
+
+  const uniqueRoutes = new Map<string, BusMapsRouteVariant>();
+
+  stops.forEach((stop) => {
+    stop.routes.forEach((route) => {
+      if (route.routeShortName !== busNumber) return;
+      const routeName = route.tripHeadsign || route.routeLongName || null;
+      const variantKey = `${route.routeId}::${(routeName || route.routeShortName).toLowerCase()}`;
+      if (!uniqueRoutes.has(variantKey)) {
+        uniqueRoutes.set(variantKey, {
+          route_id: route.routeId,
+          bus_number: route.routeShortName,
+          route_name: routeName,
+          trip_headsign: route.tripHeadsign || null,
+        });
+      }
+    });
+  });
+
+  return Array.from(uniqueRoutes.values());
+}
+
+function routePageUrl(routeId: string) {
+  const path = `/en/dushanbe?routes=${encodeURIComponent(routeId)}`;
+  if (USE_PROXY) {
+    return `${WIKIROUTES_PROXY_BASE}${path}`;
+  }
+  return `https://wikiroutes.info${path}`;
+}
+
+function extractValueAfterLabel(doc: Document, label: string): string | null {
+  const text = doc.body?.textContent || '';
+  const normalized = text.replace(/\u00a0/g, ' ');
+  const marker = `${label}:`;
+  const index = normalized.indexOf(marker);
+  if (index === -1) return null;
+
+  const tail = normalized.slice(index + marker.length).trim();
+  const firstLine = tail.split('\n').map((line) => line.trim()).find(Boolean);
+  return firstLine || null;
+}
+
+export async function fetchWikiroutesRouteDetails(routeId: string): Promise<WikiroutesRouteDetails> {
+  const response = await fetch(routePageUrl(routeId));
+  if (!response.ok) {
+    throw new Error(`WikiRoutes ${response.status}`);
+  }
+
+  const html = await response.text();
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
+  const bodyText = doc.body?.textContent?.replace(/\u00a0/g, ' ') || '';
+
+  const fare = extractValueAfterLabel(doc, 'Fare');
+  const operator = extractValueAfterLabel(doc, 'Operator');
+  const updatedAt = extractValueAfterLabel(doc, 'Last updated');
+  const cardFareMatch = bodyText.match(/City Card\s*[-–]\s*([^.]+)/i);
+
+  return {
+    routeId,
+    fare,
+    cardFare: cardFareMatch?.[1]?.trim() || null,
+    operator,
+    updatedAt,
+  };
 }
 
 function normalizePlannedSection(raw: any): BusMapsTransitSection | null {

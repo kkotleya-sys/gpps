@@ -1,5 +1,5 @@
 ﻿import { useEffect, useRef, useState } from 'react';
-import { MapPin, LogIn, Map, Clock4, Settings as SettingsIcon } from 'lucide-react';
+import { LogIn, Map, Clock4, Settings as SettingsIcon } from 'lucide-react';
 import { useAuth } from './contexts/AuthContext';
 import { useLanguage, Language } from './contexts/LanguageContext';
 import { useGeolocation } from './hooks/useGeolocation';
@@ -12,6 +12,7 @@ import { BusInfo } from './components/BusInfo';
 import { BusWithDriver, UserRole } from './types';
 import { ScheduleView } from './components/ScheduleView';
 import { fetchDushanbeLiveBuses } from './lib/busmaps';
+import { LanguageSwitcher } from './components/LanguageSwitcher';
 
 type MainTab = 'map' | 'schedule' | 'settings';
 const BUSMAPS_LIVE_ENABLED = (import.meta as any).env?.VITE_BUSMAPS_ENABLE_LIVE === 'true';
@@ -26,10 +27,33 @@ function App() {
   const [selectedBus, setSelectedBus] = useState<BusWithDriver | null>(null);
   const [guestMode, setGuestMode] = useState(false);
   const [activeTab, setActiveTab] = useState<MainTab>('map');
+  const [driverRouteId, setDriverRouteId] = useState<string | null>(null);
 
   const nextBusmapsTryAtRef = useRef<number>(0);
   const location = useGeolocation(!!user || guestMode);
   const isDriver = profile?.role === UserRole.DRIVER;
+
+  useEffect(() => {
+    if (!user?.id || !profile?.bus_number) {
+      setDriverRouteId(null);
+      return;
+    }
+
+    const key = `driverRoute:${user.id}:${profile.bus_number}`;
+    setDriverRouteId(localStorage.getItem(key));
+  }, [user?.id, profile?.bus_number]);
+
+  const handleDriverRouteChange = (routeId: string | null) => {
+    setDriverRouteId(routeId);
+    if (!user?.id || !profile?.bus_number) return;
+
+    const key = `driverRoute:${user.id}:${profile.bus_number}`;
+    if (routeId) {
+      localStorage.setItem(key, routeId);
+    } else {
+      localStorage.removeItem(key);
+    }
+  };
 
   const handleLanguageChange = (lang: Language) => {
     if (lang === language) return;
@@ -37,12 +61,6 @@ function App() {
   };
 
   useEffect(() => {
-    if (!user && !guestMode && !authLoading) setShowAuth(true);
-  }, [user, guestMode, authLoading]);
-
-  useEffect(() => {
-    if (!user && !guestMode) return;
-
     const fetchBuses = async () => {
       const now = Date.now();
 
@@ -135,8 +153,8 @@ function App() {
       <header className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 shadow-sm z-20 transition-colors duration-300">
         <div className="px-4 py-3 flex items-center justify-between">
           <div className="flex items-center space-x-3">
-            <div className="w-10 h-10 bg-gray-900 dark:bg-gray-700 rounded-2xl flex items-center justify-center shadow-lg">
-              <MapPin className="w-6 h-6 text-white" />
+            <div className="w-10 h-10 overflow-hidden rounded-2xl bg-white shadow-lg ring-1 ring-gray-200 dark:bg-gray-800 dark:ring-gray-700">
+              <img src="/icons/logo.png" alt="Dushanbe Transport" className="h-full w-full object-cover" />
             </div>
             <div>
               <h1 className="text-lg font-bold text-gray-900 dark:text-gray-50">Душанбе Транспорт</h1>
@@ -147,11 +165,7 @@ function App() {
           </div>
 
           <div className="flex items-center space-x-2">
-            <div className="flex items-center space-x-1 bg-gray-100 dark:bg-gray-800 rounded-full px-2 py-1">
-              <button onClick={() => handleLanguageChange('ru')} className={`px-2 py-0.5 rounded-lg text-[10px] font-semibold ${language === 'ru' ? 'bg-gray-900 dark:bg-gray-700 text-white' : 'text-gray-600 dark:text-gray-400'}`}>RU</button>
-              <button onClick={() => handleLanguageChange('tj')} className={`px-2 py-0.5 rounded-lg text-[10px] font-semibold ${language === 'tj' ? 'bg-gray-900 dark:bg-gray-700 text-white' : 'text-gray-600 dark:text-gray-400'}`}>TJ</button>
-              <button onClick={() => handleLanguageChange('eng')} className={`px-2 py-0.5 rounded-lg text-[10px] font-semibold ${language === 'eng' ? 'bg-gray-900 dark:bg-gray-700 text-white' : 'text-gray-600 dark:text-gray-400'}`}>ENG</button>
-            </div>
+            <LanguageSwitcher onChange={handleLanguageChange} className="animate-fade-in" />
 
             {!user && !guestMode && (
               <button
@@ -179,6 +193,7 @@ function App() {
                 isDriver={isDriver}
                 driverBusNumber={profile?.bus_number || null}
                 driverId={user?.id || null}
+                driverRouteId={driverRouteId}
               />
             </div>
           )}
@@ -190,6 +205,8 @@ function App() {
                 userLocation={location.latitude && location.longitude && !location.loading ? { lat: location.latitude, lng: location.longitude } : null}
                 isDriver={isDriver}
                 driverBusNumber={profile?.bus_number || null}
+                driverRouteId={driverRouteId}
+                onDriverRouteChange={handleDriverRouteChange}
               />
             </div>
           )}
@@ -229,6 +246,7 @@ function App() {
               bus={selectedBus}
               userLocation={location.latitude && location.longitude ? { lat: location.latitude, lng: location.longitude } : null}
               onClose={() => setSelectedBus(null)}
+              driverRouteId={driverRouteId}
             />
           )}
         </div>

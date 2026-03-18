@@ -1,10 +1,10 @@
 ﻿import { useEffect, useMemo, useRef, useState } from 'react';
 import { Clock4, Navigation, Search } from 'lucide-react';
-import { BusStopSchedule, BusWithDriver, Stop } from '../types';
+import { BusStopSchedule, BusWithDriver, Route, RouteStop, Stop } from '../types';
 import { supabase } from '../lib/supabase';
 import { useLanguage } from '../contexts/LanguageContext';
 import { StopSelector } from './StopSelector';
-import { fetchTransitRoutes } from '../lib/busmaps';
+import { fetchStopsInRadius, fetchTransitRoutes } from '../lib/busmaps';
 import { formatEta } from '../lib/text';
 
 interface ScheduleViewProps {
@@ -12,6 +12,8 @@ interface ScheduleViewProps {
   userLocation: { lat: number; lng: number } | null;
   isDriver: boolean;
   driverBusNumber: string | null;
+  driverRouteId: string | null;
+  onDriverRouteChange: (routeId: string | null) => void;
 }
 
 type RouteInstruction = {
@@ -124,10 +126,12 @@ function buildInstructionText(params: {
   return lines.join('\n');
 }
 
-export function ScheduleView({ buses, userLocation, isDriver, driverBusNumber }: ScheduleViewProps) {
+export function ScheduleView({ buses, userLocation, isDriver, driverBusNumber, driverRouteId, onDriverRouteChange }: ScheduleViewProps) {
   const { t, language } = useLanguage();
   const [stops, setStops] = useState<Stop[]>([]);
   const [schedules, setSchedules] = useState<BusStopSchedule[]>([]);
+  const [routes, setRoutes] = useState<Route[]>([]);
+  const [routeStops, setRouteStops] = useState<RouteStop[]>([]);
 
   const [nearestStopQuery, setNearestStopQuery] = useState('');
   const [nearestStopId, setNearestStopId] = useState<string | null>(null);
@@ -148,14 +152,42 @@ export function ScheduleView({ buses, userLocation, isDriver, driverBusNumber }:
         supabase.from('stops').select('*'),
         supabase.from('bus_stop_schedules').select('*'),
       ]);
+      const [routesResp, routeStopsResp] = await Promise.all([
+        supabase.from('routes').select('*'),
+        supabase.from('route_stops').select('*'),
+      ]);
 
-      if (stopsResp.data) {
-        const sortedStops = [...(stopsResp.data as Stop[])].sort((a, b) =>
+      const stopRows =
+        stopsResp.data && stopsResp.data.length > 0
+          ? (stopsResp.data as Stop[])
+          : (
+              await fetchStopsInRadius({
+                lat: 38.5598,
+                lon: 68.787,
+                radiusMeters: 20000,
+                limit: 5000,
+                language,
+              }).catch(() => ({ stops: [] }))
+            ).stops.map((stop) => ({
+              id: `busmaps_${stop.id}`,
+              name: stop.name,
+              name_ru: stop.name_ru || stop.name,
+              name_tj: stop.name_tj || stop.name,
+              name_eng: stop.name_eng || stop.name,
+              latitude: stop.lat,
+              longitude: stop.lon,
+              created_at: '',
+            }));
+
+      if (stopRows.length > 0) {
+        const sortedStops = [...stopRows].sort((a, b) =>
           (a.name_ru || a.name || '').localeCompare(b.name_ru || b.name || '', language === 'ru' ? 'ru' : undefined)
         );
         setStops(sortedStops);
       }
       if (schedulesResp.data) setSchedules(schedulesResp.data as BusStopSchedule[]);
+      if (routesResp.data) setRoutes(routesResp.data as Route[]);
+      if (routeStopsResp.data) setRouteStops(routeStopsResp.data as RouteStop[]);
     };
 
     fetchData();
@@ -164,6 +196,8 @@ export function ScheduleView({ buses, userLocation, isDriver, driverBusNumber }:
       .channel('schedule_data_updates')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'stops' }, fetchData)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'bus_stop_schedules' }, fetchData)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'routes' }, fetchData)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'route_stops' }, fetchData)
       .subscribe();
 
     return () => {
@@ -237,13 +271,51 @@ export function ScheduleView({ buses, userLocation, isDriver, driverBusNumber }:
     };
   }, [nearestStopId, nearestStopQuery, schedulesWithStops, etaByStopAndBus]);
 
-  const driverRouteStops = useMemo(() => {
-    if (!driverBusNumber) return [];
+  const driverRoutes = useMemo(
+    () => routes.filter((route) => route.bus_number === driverBusNumber),
+    [routes, driverBusNumber]
+  );
 
-    return schedulesWithStops
-      .filter(({ schedule }) => schedule.bus_number === driverBusNumber)
-      .sort((a, b) => a.schedule.order_index - b.schedule.order_index);
-  }, [driverBusNumber, schedulesWithStops]);
+  const selectedDriverRoute =
+    driverRoutes.find((route) => route.id === driverRouteId) ||
+    driverRoutes.find((route) => route.is_active) ||
+    driverRoutes[0] ||
+    null;
+
+  useEffect(() => {
+    if (!driverBusNumber || !selectedDriverRoute) return;
+    if (driverRouteId === selectedDriverRoute.id) return;
+    onDriverRouteChange(selectedDriverRoute.id);
+  }, [driverBusNumber, driverRouteId, onDriverRouteChange, selectedDriverRoute]);
+
+  const driverRouteVariants = useMemo(
+    () =>
+      driverRoutes.map((route) => {
+        const orderedStops = routeStops
+          .filter((routeStop) => routeStop.route_id === route.id)
+          .sort((a, b) => a.order_index - b.order_index)
+          .map((routeStop) => ({
+            routeStop,
+            stop: stopsMap.get(routeStop.stop_id) || null,
+          }))
+          .filter((item): item is { routeStop: RouteStop; stop: Stop } => !!item.stop);
+
+        return {
+          route,
+          orderedStops,
+          title:
+            orderedStops.length >= 2
+              ? `${stopDisplayName(orderedStops[0].stop, language)} -> ${stopDisplayName(orderedStops[orderedStops.length - 1].stop, language)}`
+              : route.name,
+        };
+      }),
+    [driverRoutes, routeStops, stopsMap, language]
+  );
+
+  const driverRouteStops = useMemo(() => {
+    const match = driverRouteVariants.find((item) => item.route.id === selectedDriverRoute?.id);
+    return match?.orderedStops || [];
+  }, [driverRouteVariants, selectedDriverRoute]);
 
   const handleCalculateRoute = async () => {
     if (!startStop || !endStop) {
@@ -374,26 +446,49 @@ export function ScheduleView({ buses, userLocation, isDriver, driverBusNumber }:
             <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-50 mb-2">
               {t('schedule.mySchedule')} ({t('map.busNumber')}{driverBusNumber})
             </h3>
-            {driverRouteStops.length === 0 ? (
+            {driverRouteVariants.length === 0 ? (
               <p className="text-xs text-gray-500 dark:text-gray-400">
-                Для вашего автобуса пока нет загруженного списка остановок.
+                Для вашего автобуса пока нет загруженных рейсов.
               </p>
             ) : (
-              <div className="space-y-2">
-                {driverRouteStops.map(({ schedule, stop }, index) => (
-                  <div
-                    key={`${schedule.bus_number}_${schedule.stop_id}_${schedule.order_index}`}
-                    className="flex items-center justify-between rounded-2xl bg-gray-100 dark:bg-gray-700 px-3 py-2 text-xs"
-                  >
-                    <p className="font-semibold text-slate-900 dark:text-slate-50">
-                      {index + 1}. {stopDisplayName(stop, language)}
-                    </p>
-                    <span className="text-gray-500 dark:text-gray-300">
-                      {schedule.arrival_time || '-'}
-                    </span>
+              <>
+                <div className="space-y-2 mb-4">
+                  <p className="text-xs text-gray-500 dark:text-gray-400">Рейсы</p>
+                  {driverRouteVariants.map((item) => (
+                    <button
+                      key={item.route.id}
+                      onClick={() => onDriverRouteChange(item.route.id)}
+                      className={`w-full rounded-2xl border px-3 py-2 text-left ${
+                        selectedDriverRoute?.id === item.route.id
+                          ? 'border-gray-900 dark:border-gray-200 bg-gray-100 dark:bg-gray-700'
+                          : 'border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800'
+                      }`}
+                    >
+                      <p className="text-xs font-semibold text-slate-900 dark:text-slate-50">{item.title}</p>
+                      <p className="text-[11px] text-gray-500 dark:text-gray-400">{item.orderedStops.length} остановок</p>
+                    </button>
+                  ))}
+                </div>
+
+                {selectedDriverRoute && (
+                  <div className="space-y-2">
+                    <p className="text-xs text-gray-500 dark:text-gray-400">Выбранный рейс</p>
+                    {driverRouteStops.map(({ routeStop, stop }, index) => (
+                      <div
+                        key={`${selectedDriverRoute.id}_${routeStop.stop_id}_${routeStop.order_index}`}
+                        className="flex items-center justify-between rounded-2xl bg-gray-100 dark:bg-gray-700 px-3 py-2 text-xs"
+                      >
+                        <p className="font-semibold text-slate-900 dark:text-slate-50">
+                          {index + 1}. {stopDisplayName(stop, language)}
+                        </p>
+                        <span className="text-gray-500 dark:text-gray-300">
+                          {routeStop.arrival_time || '-'}
+                        </span>
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
+                )}
+              </>
             )}
           </section>
         )}

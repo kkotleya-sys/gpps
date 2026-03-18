@@ -1,11 +1,12 @@
 ﻿import { useEffect, useMemo, useRef, useState } from 'react';
-import { BusStopSchedule, BusWithDriver, Stop } from '../types';
+import { BusStopSchedule, BusWithDriver, Route, RouteStop, Stop } from '../types';
 import { supabase } from '../lib/supabase';
 import { useLanguage } from '../contexts/LanguageContext';
 import { loadMapbox } from '../lib/mapboxLoader';
 import { loadNotificationPrefs } from '../lib/notifications';
 import { formatEta } from '../lib/text';
 import { getMapboxRoutePolyline } from '../lib/routingMapbox';
+import { fetchStopsInRadius } from '../lib/busmaps';
 
 type StopMarker = {
   marker: any;
@@ -21,6 +22,7 @@ interface MapViewProps {
   isDriver?: boolean;
   driverBusNumber?: string | null;
   driverId?: string | null;
+  driverRouteId?: string | null;
 }
 
 declare global {
@@ -43,7 +45,7 @@ function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): nu
   return R * c;
 }
 
-export function MapView({ buses, userLocation, onBusClick, isDriver, driverBusNumber, driverId }: MapViewProps) {
+export function MapView({ buses, userLocation, onBusClick, isDriver, driverBusNumber, driverId, driverRouteId }: MapViewProps) {
   const { t, language } = useLanguage();
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapInstance = useRef<any>(null);
@@ -51,14 +53,18 @@ export function MapView({ buses, userLocation, onBusClick, isDriver, driverBusNu
   const stopMarkers = useRef<Map<string, StopMarker>>(new Map());
   const userMarker = useRef<any>(null);
   const userRouteLayerRef = useRef<{ sourceId: string; layerId: string } | null>(null);
+  const busRouteLayerRef = useRef<{ sourceId: string; layerId: string } | null>(null);
   const speedHistoryRef = useRef<Map<string, number[]>>(new Map());
   const lastNotifyRef = useRef<Map<string, number>>(new Map());
 
   const [mapLoaded, setMapLoaded] = useState(false);
   const [stops, setStops] = useState<Stop[]>([]);
   const [schedules, setSchedules] = useState<BusStopSchedule[]>([]);
+  const [routes, setRoutes] = useState<Route[]>([]);
+  const [routeStops, setRouteStops] = useState<RouteStop[]>([]);
   const [selectedStopId, setSelectedStopId] = useState<string | null>(null);
   const [activeBusFilter, setActiveBusFilter] = useState<string | 'all'>('all');
+  const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null);
   const [showRoute, setShowRoute] = useState(false);
   const [userToStopPath, setUserToStopPath] = useState<LatLng[] | null>(null);
 
@@ -112,13 +118,44 @@ export function MapView({ buses, userLocation, onBusClick, isDriver, driverBusNu
 
   useEffect(() => {
     const fetchData = async () => {
-      const [stopsResp, schedulesResp] = await Promise.all([
+      const [stopsResp, schedulesResp, routesResp, routeStopsResp] = await Promise.all([
         supabase.from('stops').select('*'),
         supabase.from('bus_stop_schedules').select('*'),
+        supabase.from('routes').select('*'),
+        supabase.from('route_stops').select('*'),
       ]);
 
-      if (stopsResp.data) setStops(stopsResp.data as Stop[]);
+      if (stopsResp.data && stopsResp.data.length > 0) {
+        setStops(stopsResp.data as Stop[]);
+      } else {
+        try {
+          const fallback = await fetchStopsInRadius({
+            lat: 38.5598,
+            lon: 68.787,
+            radiusMeters: 20000,
+            limit: 5000,
+            language,
+          });
+
+          setStops(
+            fallback.stops.map((stop) => ({
+              id: `busmaps_${stop.id}`,
+              name: stop.name,
+              name_ru: stop.name_ru || stop.name,
+              name_tj: stop.name_tj || stop.name,
+              name_eng: stop.name_eng || stop.name,
+              latitude: stop.lat,
+              longitude: stop.lon,
+              created_at: '',
+            }))
+          );
+        } catch {
+          setStops([]);
+        }
+      }
       if (schedulesResp.data) setSchedules(schedulesResp.data as BusStopSchedule[]);
+      if (routesResp.data) setRoutes(routesResp.data as Route[]);
+      if (routeStopsResp.data) setRouteStops(routeStopsResp.data as RouteStop[]);
     };
 
     fetchData();
@@ -127,12 +164,14 @@ export function MapView({ buses, userLocation, onBusClick, isDriver, driverBusNu
       .channel('map_support_data')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'stops' }, fetchData)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'bus_stop_schedules' }, fetchData)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'routes' }, fetchData)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'route_stops' }, fetchData)
       .subscribe();
 
     return () => {
       supabase.removeChannel(channel);
     };
-  }, []);
+  }, [language]);
 
   const busesByNumber = useMemo(() => {
     const map = new Map<string, BusWithDriver[]>();
@@ -154,14 +193,104 @@ export function MapView({ buses, userLocation, onBusClick, isDriver, driverBusNu
     return map;
   }, [schedules]);
 
+  const activeBusRouteVariants = useMemo(() => {
+    if (activeBusFilter === 'all') return [];
+
+    return routes
+      .filter((route) => route.bus_number === activeBusFilter)
+      .map((route) => {
+        const orderedStops = routeStops
+          .filter((routeStop) => routeStop.route_id === route.id)
+          .sort((a, b) => a.order_index - b.order_index)
+          .map((routeStop) => stops.find((stop) => stop.id === routeStop.stop_id) || null)
+          .filter((stop): stop is Stop => !!stop);
+
+        return {
+          route,
+          orderedStops,
+          title:
+            orderedStops.length >= 2
+              ? `${getStopName(orderedStops[0])} -> ${getStopName(orderedStops[orderedStops.length - 1])}`
+              : route.name,
+        };
+      })
+      .filter((item) => item.orderedStops.length > 0);
+  }, [activeBusFilter, routes, routeStops, stops, language]);
+
+  useEffect(() => {
+    if (activeBusFilter === 'all') {
+      setSelectedRouteId(null);
+      return;
+    }
+
+    const preferredRouteId =
+      activeBusFilter === driverBusNumber && driverRouteId
+        ? driverRouteId
+        : activeBusRouteVariants.find((item) => item.route.is_active)?.route.id ||
+          activeBusRouteVariants[0]?.route.id ||
+          null;
+
+    if (selectedRouteId && activeBusRouteVariants.some((item) => item.route.id === selectedRouteId)) return;
+    setSelectedRouteId(preferredRouteId);
+  }, [activeBusFilter, activeBusRouteVariants, driverBusNumber, driverRouteId, selectedRouteId]);
+
+  const effectiveRouteId =
+    activeBusFilter !== 'all'
+      ? activeBusFilter === driverBusNumber && driverRouteId
+        ? driverRouteId
+        : selectedRouteId
+      : null;
+
+  const selectedRouteStopIds = useMemo(() => {
+    if (!effectiveRouteId) return new Set<string>();
+    return new Set(
+      routeStops
+        .filter((routeStop) => routeStop.route_id === effectiveRouteId)
+        .map((routeStop) => routeStop.stop_id)
+    );
+  }, [effectiveRouteId, routeStops]);
+
+  const filteredRoutePath = useMemo(() => {
+    if (!showRoute || activeBusFilter === 'all') return null;
+
+    if (effectiveRouteId) {
+      const orderedStops = routeStops
+        .filter((routeStop) => routeStop.route_id === effectiveRouteId)
+        .sort((a, b) => a.order_index - b.order_index)
+        .map((routeStop) => stops.find((stop) => stop.id === routeStop.stop_id) || null)
+        .filter((stop): stop is Stop => !!stop);
+
+      const uniqueStops = Array.from(new Map(orderedStops.map((stop) => [stop.id, stop])).values());
+      if (uniqueStops.length >= 2) {
+        return uniqueStops.map((stop) => [stop.longitude, stop.latitude]);
+      }
+    }
+
+    const orderedStops = schedules
+      .filter((schedule) => schedule.bus_number === activeBusFilter)
+      .sort((a, b) => a.order_index - b.order_index)
+      .map((schedule) => stops.find((stop) => stop.id === schedule.stop_id) || null)
+      .filter((stop): stop is Stop => !!stop);
+
+    const uniqueStops = Array.from(
+      new Map(orderedStops.map((stop) => [stop.id, stop])).values()
+    );
+
+    if (uniqueStops.length < 2) return null;
+    return uniqueStops.map((stop) => [stop.longitude, stop.latitude]);
+  }, [activeBusFilter, effectiveRouteId, routeStops, schedules, showRoute, stops]);
+
   const liveQueue = useMemo(() => {
     if (!showRoute || activeBusFilter === 'all') return [];
     const busesForNumber = buses.filter((bus) => bus.bus_number === activeBusFilter);
     if (busesForNumber.length === 0) return [];
 
-    const candidateStops = stops.filter((stop) =>
-      (stopScheduleMap.get(stop.id) || []).some((schedule) => schedule.bus_number === activeBusFilter)
-    );
+    const candidateStops =
+      selectedRouteStopIds.size > 0
+        ? stops.filter((stop) => selectedRouteStopIds.has(stop.id))
+        : stops.filter((stop) =>
+            (stopScheduleMap.get(stop.id) || []).some((schedule) => schedule.bus_number === activeBusFilter)
+          );
 
     return busesForNumber
       .map((bus) => {
@@ -184,7 +313,7 @@ export function MapView({ buses, userLocation, onBusClick, isDriver, driverBusNu
       })
       .filter((item): item is { bus: BusWithDriver; nextStop: Stop; distanceKm: number; etaMinutes: number } => !!item.nextStop)
       .sort((a, b) => a.etaMinutes - b.etaMinutes);
-  }, [showRoute, activeBusFilter, buses, stops, stopScheduleMap]);
+  }, [showRoute, activeBusFilter, buses, stops, stopScheduleMap, selectedRouteStopIds]);
 
   useEffect(() => {
     if (!mapInstance.current || !mapLoaded) return;
@@ -250,9 +379,11 @@ export function MapView({ buses, userLocation, onBusClick, isDriver, driverBusNu
           : stopSchedules.filter((schedule) => schedule.bus_number === activeBusFilter);
       const busNumbers = new Set(stopSchedules.map((item) => item.bus_number));
       const isVisible =
-        activeBusFilter === 'all' ||
-        !showRoute ||
-        busNumbers.has(activeBusFilter);
+        activeBusFilter === 'all'
+          ? true
+          : showRoute && selectedRouteStopIds.size > 0
+            ? selectedRouteStopIds.has(stop.id)
+            : busNumbers.has(activeBusFilter);
 
       const arrivalLines = relevantSchedules
         .map((schedule) => {
@@ -313,7 +444,7 @@ export function MapView({ buses, userLocation, onBusClick, isDriver, driverBusNu
         stopMarkers.current.delete(stopId);
       }
     });
-  }, [stops, stopScheduleMap, activeBusFilter, showRoute, busesByNumber, language, mapLoaded]);
+  }, [stops, stopScheduleMap, activeBusFilter, showRoute, busesByNumber, language, mapLoaded, selectedRouteStopIds]);
 
   const selectedStop = useMemo(
     () => stops.find((stop) => stop.id === selectedStopId) || null,
@@ -481,6 +612,48 @@ export function MapView({ buses, userLocation, onBusClick, isDriver, driverBusNu
     userRouteLayerRef.current = { sourceId, layerId };
   }, [userToStopPath, mapLoaded]);
 
+  useEffect(() => {
+    if (!mapInstance.current || !mapLoaded) return;
+
+    const map = mapInstance.current;
+    const sourceId = 'selected-bus-route';
+    const layerId = 'selected-bus-route-line';
+
+    if (!filteredRoutePath || filteredRoutePath.length < 2) {
+      if (map.getLayer(layerId)) map.removeLayer(layerId);
+      if (map.getSource(sourceId)) map.removeSource(sourceId);
+      busRouteLayerRef.current = null;
+      return;
+    }
+
+    const geojson = {
+      type: 'Feature',
+      geometry: {
+        type: 'LineString',
+        coordinates: filteredRoutePath,
+      },
+    };
+
+    if (map.getSource(sourceId)) {
+      map.getSource(sourceId).setData(geojson);
+    } else {
+      map.addSource(sourceId, { type: 'geojson', data: geojson });
+      map.addLayer({
+        id: layerId,
+        type: 'line',
+        source: sourceId,
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: {
+          'line-color': '#2563eb',
+          'line-width': 5,
+          'line-opacity': 0.78,
+        },
+      });
+    }
+
+    busRouteLayerRef.current = { sourceId, layerId };
+  }, [filteredRoutePath, mapLoaded]);
+
   return (
     <div className="w-full h-full relative">
       <div ref={mapContainer} className="w-full h-full" />
@@ -537,6 +710,23 @@ export function MapView({ buses, userLocation, onBusClick, isDriver, driverBusNu
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {showRoute && activeBusFilter !== 'all' && activeBusRouteVariants.length > 1 && (
+        <div className="absolute top-14 left-3 z-10 w-[min(420px,calc(100%-24px))] rounded-2xl border border-gray-200 dark:border-gray-700 bg-white/95 dark:bg-gray-900/95 p-3 shadow-lg">
+          <p className="mb-2 text-[11px] font-semibold text-gray-900 dark:text-gray-50">Рейс автобуса</p>
+          <select
+            className="w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 px-3 py-2 text-[12px] outline-none focus:ring-1 focus:ring-primary-500"
+            value={effectiveRouteId || ''}
+            onChange={(event) => setSelectedRouteId(event.target.value || null)}
+          >
+            {activeBusRouteVariants.map((item) => (
+              <option key={item.route.id} value={item.route.id}>
+                {item.title} ({item.orderedStops.length} ост.)
+              </option>
+            ))}
+          </select>
         </div>
       )}
 

@@ -32,6 +32,12 @@ export default defineConfig(({ mode }) => {
             });
           },
         },
+        '/api/wikiroutes': {
+          target: 'https://wikiroutes.info',
+          changeOrigin: true,
+          secure: true,
+          rewrite: (path) => path.replace(/^\/api\/wikiroutes/, ''),
+        },
       },
     },
   };

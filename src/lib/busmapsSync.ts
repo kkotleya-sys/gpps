@@ -91,6 +91,18 @@ function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function normalizeVariantLabel(value: string | null | undefined, fallback: string) {
+  return (value || '').trim() || fallback;
+}
+
+function buildVariantKey(route: {
+  route_external_id: string;
+  route_name: string;
+  bus_number: string;
+}) {
+  return `${route.route_external_id}::${route.route_name.toLowerCase()}`;
+}
+
 async function safeDeleteAll(table: string) {
   const { error } = await supabase.from(table as any).delete().not('id', 'is', null);
   if (error && !isMissingSchemaError(error)) throw error;
@@ -173,29 +185,50 @@ export async function syncBusMapsDushanbe(options: {
   const routeMap = new Map<string, { bus_number: string; route_name: string; route_external_id: string }>();
   stops.forEach((stop) => {
     stop.routes.forEach((r) => {
-      if (!routeMap.has(r.routeId)) {
-        routeMap.set(r.routeId, {
+      const routeName = normalizeVariantLabel(
+        r.tripHeadsign || r.routeLongName,
+        `Маршрут ${r.routeShortName}`
+      );
+      const variantKey = `${r.routeId}::${routeName.toLowerCase()}`;
+
+      if (!routeMap.has(variantKey)) {
+        routeMap.set(variantKey, {
           route_external_id: r.routeId,
           bus_number: r.routeShortName,
-          route_name: r.routeLongName || r.tripHeadsign || `Маршрут ${r.routeShortName}`,
+          route_name: routeName,
         });
       }
     });
   });
 
+  const routeEntries = Array.from(routeMap.values());
+
+  const duplicateCounters = new Map<string, number>();
+  const namedRoutes = routeEntries.map((route) => {
+    const baseName = route.route_name || `Маршрут ${route.bus_number}`;
+    const key = `${route.bus_number}::${baseName}`;
+    const nextIndex = duplicateCounters.get(key) || 0;
+    duplicateCounters.set(key, nextIndex + 1);
+
+    return {
+      ...route,
+      route_name: nextIndex === 0 ? baseName : `${baseName} · рейс ${nextIndex + 1}`,
+    };
+  });
+
   const firstRoutePerBus = new Map<string, string>();
-  Array.from(routeMap.values()).forEach((route) => {
+  namedRoutes.forEach((route) => {
     if (!firstRoutePerBus.has(route.bus_number)) {
-      firstRoutePerBus.set(route.bus_number, route.route_external_id);
+      firstRoutePerBus.set(route.bus_number, buildVariantKey(route));
     }
   });
 
-  const catalogRows = Array.from(routeMap.values()).map((r) => ({
+  const catalogRows = namedRoutes.map((r) => ({
     bus_number: r.bus_number,
     route_name: r.route_name,
     route_external_id: r.route_external_id,
     source: 'busmaps',
-    is_active: firstRoutePerBus.get(r.bus_number) === r.route_external_id,
+    is_active: firstRoutePerBus.get(r.bus_number) === buildVariantKey(r),
   }));
 
   if (catalogRows.length > 0) {
@@ -235,9 +268,17 @@ export async function syncBusMapsDushanbe(options: {
   const scheduleRowKeys = new Set<string>();
   const arrivalByBusAndStop = new Map<string, string | null>();
 
-  routeMap.forEach((route) => {
+  namedRoutes.forEach((route) => {
     const routeStops = stops
-      .filter((stop) => stop.routes.some((item) => item.routeId === route.route_external_id))
+      .filter((stop) =>
+        stop.routes.some((item) => {
+          const routeName = normalizeVariantLabel(
+            item.tripHeadsign || item.routeLongName,
+            `Маршрут ${item.routeShortName}`
+          );
+          return `${item.routeId}::${routeName.toLowerCase()}` === buildVariantKey(route);
+        })
+      )
       .map((stop) => {
         const key = `${stop.lat.toFixed(6)}|${stop.lon.toFixed(6)}`;
         const stopId = stopIdByCoords.get(key);
@@ -331,12 +372,8 @@ export async function syncBusMapsDushanbe(options: {
   if (routesResult.error) throw routesResult.error;
 
   const routeIdByBusAndName = new Map<string, string>();
-  const routesByBusNumber = new Map<string, Array<{ id: string; is_active?: boolean; name?: string | null }>>();
   (dbRoutes as any[] | null)?.forEach((route) => {
     routeIdByBusAndName.set(`${route.bus_number}::${route.name}`, String(route.id));
-    const next = routesByBusNumber.get(String(route.bus_number)) || [];
-    next.push({ id: String(route.id), is_active: Boolean(route.is_active), name: route.name || null });
-    routesByBusNumber.set(String(route.bus_number), next);
   });
 
   const routeStopRows: Array<{
@@ -346,12 +383,20 @@ export async function syncBusMapsDushanbe(options: {
     arrival_time: string | null;
   }> = [];
 
-  routeMap.forEach((route) => {
+  namedRoutes.forEach((route) => {
     const routeId = routeIdByBusAndName.get(`${route.bus_number}::${route.route_name}`);
     if (!routeId) return;
 
     const routeStops = stops
-      .filter((stop) => stop.routes.some((item) => item.routeId === route.route_external_id))
+      .filter((stop) =>
+        stop.routes.some((item) => {
+          const routeName = normalizeVariantLabel(
+            item.tripHeadsign || item.routeLongName,
+            `Маршрут ${item.routeShortName}`
+          );
+          return `${item.routeId}::${routeName.toLowerCase()}` === buildVariantKey(route);
+        })
+      )
       .map((stop) => {
         const key = `${stop.lat.toFixed(6)}|${stop.lon.toFixed(6)}`;
         const stopId = stopIdByCoords.get(key);
@@ -378,52 +423,6 @@ export async function syncBusMapsDushanbe(options: {
         order_index: index,
         arrival_time: item.arrival_time,
       });
-    });
-  });
-
-  const existingRouteStopKeys = new Set(routeStopRows.map((row) => `${row.route_id}::${row.stop_id}`));
-  const dbStopsById = new Map((dbStops as any[]).map((stop) => [String(stop.id), stop]));
-  const scheduleStopsByBus = new Map<string, Array<{ stop_id: string; order_index: number; arrival_time: string | null; lat: number; lon: number }>>();
-
-  scheduleRows.forEach((schedule) => {
-    const stop = dbStopsById.get(String(schedule.stop_id));
-    if (!stop) return;
-
-    const next = scheduleStopsByBus.get(schedule.bus_number) || [];
-    next.push({
-      stop_id: schedule.stop_id,
-      order_index: schedule.order_index,
-      arrival_time: schedule.arrival_time,
-      lat: Number(stop.latitude),
-      lon: Number(stop.longitude),
-    });
-    scheduleStopsByBus.set(schedule.bus_number, next);
-  });
-
-  scheduleStopsByBus.forEach((items, busNumber) => {
-    const routeCandidates = routesByBusNumber.get(busNumber) || [];
-    const chosenRoute = routeCandidates.find((route) => route.is_active) || routeCandidates[0];
-    if (!chosenRoute) return;
-
-    const uniqueItems = Array.from(
-      new Map(
-        items
-          .sort((a, b) => a.order_index - b.order_index)
-          .map((item) => [item.stop_id, item])
-      ).values()
-    );
-
-    orderStopsByRouteShape(uniqueItems).forEach((item, index) => {
-      const key = `${chosenRoute.id}::${item.stop_id}`;
-      if (existingRouteStopKeys.has(key)) return;
-
-      routeStopRows.push({
-        route_id: chosenRoute.id,
-        stop_id: item.stop_id,
-        order_index: index,
-        arrival_time: item.arrival_time,
-      });
-      existingRouteStopKeys.add(key);
     });
   });
 
